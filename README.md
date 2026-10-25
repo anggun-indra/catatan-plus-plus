@@ -83,6 +83,16 @@ Suite pengujian bawaan menguji 66 assertion mencakup: pemetaan sintaks 96 bahasa
 
 ---
 
+## 🙏 Credits & Acknowledgements
+
+Proyek **catatan++** berdiri di atas dedikasi luar biasa komunitas open-source:
+- **[Notepad++](https://notepad-plus-plus.org/) & Don Ho:** Untuk karya legendaris, tata letak toolbar, definisi bahasa (`langs.model.xml`), dan tema pewarnaan sintaks (`stylers.model.xml`).
+- **[Scintilla](https://www.scintilla.org/) & Neil Hodgson:** Untuk engine penyunting teks berperforma tinggi dan backend Cocoa bawaan.
+- **[Lexilla](https://www.scintilla.org/Lexilla.html):** Untuk 142 lexer pewarnaan sintaks bahasa pemrograman.
+- **[Solar Icons](https://solar-icons.dev/):** Untuk ikon vektor yang digunakan pada toolbar antarmuka.
+
+---
+
 ## 📄 Lisensi
 
 Proyek ini menggunakan kode hulu dari [Notepad++](https://github.com/notepad-plus-plus/notepad-plus-plus), Scintilla, dan Lexilla yang berlisensi **GNU General Public License v3 (GPLv3)**.
