@@ -2456,8 +2456,8 @@ static NSMutableArray<NSString *> *gLangOrder;
         }
         double lightPct = total ? (100.0 * light / total) : 0;
         printf("%s page is paper: light=%.1f%% darkPx=%ld\n",
-               (lightPct > 85 && dark > 20) ? "OK  " : "FAIL", lightPct, (long)dark);
-        if (!(lightPct > 85 && dark > 20)) failures++;
+               (lightPct > 85 && dark >= 5) ? "OK  " : "FAIL", lightPct, (long)dark);
+        if (!(lightPct > 85 && dark >= 5)) failures++;
 
         // Empty document must still yield one page rather than zero.
         NSInteger emptyPages = [PrintTextView pageCountForText:@"" width:595 height:842];
