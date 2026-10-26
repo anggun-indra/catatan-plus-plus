@@ -269,6 +269,7 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
 @interface AppDelegate : NSObject <NSApplicationDelegate, TabStripViewDelegate, ToolbarViewDelegate, SidebarViewDelegate, FindInFilesDelegate, NSWindowDelegate, WKScriptMessageHandler, NSMenuDelegate, AutoUpdaterDelegate>
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) NSMenuItem *updateMenuItem;
+@property (nonatomic, strong) NSMenuItem *helpUpdateMenuItem;
 @property (nonatomic, strong) ToolbarView *toolbar;
 @property (nonatomic, strong) SidebarView *sidebar;
 @property (nonatomic, strong) WKWebView *previewWebView;
@@ -2510,9 +2511,21 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     }
 }
 
+- (void)showAboutAction:(id)sender {
+    (void)sender;
+    NSDictionary *options = @{
+        NSAboutPanelOptionApplicationName: @"Catatan++",
+        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.1",
+        NSAboutPanelOptionVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"2",
+        @"Copyright": @"© 2026 Anggun Indra & Upstream Notepad++ Contributors"
+    };
+    [NSApp orderFrontStandardAboutPanelWithOptions:options];
+}
+
 - (void)autoUpdaterDidBecomeReadyToInstall:(AutoUpdater *)updater {
     NSString *title = [NSString stringWithFormat:@"⟳ Restart to Update (v%@)", updater.latestVersion];
     self.updateMenuItem.title = title;
+    self.helpUpdateMenuItem.title = title;
     [self flashStatus:[NSString stringWithFormat:@"Update ready: v%@. Click menu to restart and apply.", updater.latestVersion]];
 }
 
@@ -2526,7 +2539,9 @@ static NSMutableArray<NSString *> *gLangOrder;
     // Application Menu
     NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
     NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@""];
-    [appMenu addItemWithTitle:@"About catatan++" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+    NSMenuItem *aboutItem = [[NSMenuItem alloc] initWithTitle:@"About Catatan++" action:@selector(showAboutAction:) keyEquivalent:@""];
+    aboutItem.target = self;
+    [appMenu addItem:aboutItem];
     
     self.updateMenuItem = [[NSMenuItem alloc] initWithTitle:@"Check for Updates…"
                                                      action:@selector(checkForUpdatesAction:)
@@ -2717,6 +2732,27 @@ static NSMutableArray<NSString *> *gLangOrder;
     }
     langItem.submenu = langMenu;
     [bar addItem:langItem];
+
+    // Help Menu
+    NSMenuItem *helpItem = [[NSMenuItem alloc] initWithTitle:@"Help" action:nil keyEquivalent:@""];
+    NSMenu *helpMenu = [[NSMenu alloc] initWithTitle:@"Help"];
+
+    NSMenuItem *aboutHelp = [[NSMenuItem alloc] initWithTitle:@"About Catatan++"
+                                                       action:@selector(showAboutAction:)
+                                                keyEquivalent:@""];
+    aboutHelp.target = self;
+    [helpMenu addItem:aboutHelp];
+    [helpMenu addItem:[NSMenuItem separatorItem]];
+
+    self.helpUpdateMenuItem = [[NSMenuItem alloc] initWithTitle:@"Check for Updates…"
+                                                         action:@selector(checkForUpdatesAction:)
+                                                  keyEquivalent:@""];
+    self.helpUpdateMenuItem.target = self;
+    [helpMenu addItem:self.helpUpdateMenuItem];
+
+    helpItem.submenu = helpMenu;
+    [bar addItem:helpItem];
+    [NSApp setHelpMenu:helpMenu];
 
     NSApp.mainMenu = bar;
 }
@@ -4234,9 +4270,10 @@ static NSMutableArray<NSString *> *gLangOrder;
         AutoUpdater *u = [AutoUpdater sharedUpdater];
         BOOL updaterOK = (u != nil) && [u.repoOwner isEqualToString:@"anggun-indra"] && [u.repoName isEqualToString:@"catatan-plus-plus"];
         BOOL menuOK = (self.updateMenuItem != nil) && [self.updateMenuItem.title containsString:@"Update"];
-        printf("%s auto updater repo=%s/%s menuBound=%d\n",
-               (updaterOK && menuOK) ? "OK  " : "FAIL", [u.repoOwner UTF8String], [u.repoName UTF8String], menuOK);
-        if (!updaterOK || !menuOK) failures++;
+        BOOL helpMenuOK = (self.helpUpdateMenuItem != nil) && [self.helpUpdateMenuItem.title containsString:@"Update"];
+        printf("%s auto updater repo=%s/%s menuBound=%d helpMenuBound=%d\n",
+               (updaterOK && menuOK && helpMenuOK) ? "OK  " : "FAIL", [u.repoOwner UTF8String], [u.repoName UTF8String], menuOK, helpMenuOK);
+        if (!updaterOK || !menuOK || !helpMenuOK) failures++;
     }
 
     printf("SELFTEST_DONE failures=%d\n", failures);
