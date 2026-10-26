@@ -286,10 +286,17 @@ const char *UndoHistory::AppendAction(ActionType at, Sci::Position position, con
 				;	// A coalescible containerAction
 			} else if ((at != actions.types[targetAct].at)) { // } && (!actions.AtStart(targetAct))) {
 				coalesce = false;
-			} else if ((at == ActionType::insert) &&
-			           (position != (actions.Position(targetAct) + actions.Length(targetAct)))) {
-				// Insertions must be immediately after to coalesce
-				coalesce = false;
+			} else if (at == ActionType::insert) {
+				if (position != (actions.Position(targetAct) + actions.Length(targetAct))) {
+					// Insertions must be immediately after to coalesce
+					coalesce = false;
+				} else if (lengthData > 0 && (data[0] == '\n' || data[0] == '\r')) {
+					// Line breaks (Enter) start a new undo action
+					coalesce = false;
+				} else if (lengthData == 1 && (data[0] == ' ' || data[0] == '\t')) {
+					// Whitespace delimiters start a new undo action
+					coalesce = false;
+				}
 			} else if (at == ActionType::remove) {
 				if ((lengthData == 1) || (lengthData == 2)) {
 					if ((position + lengthData) == actions.Position(targetAct)) {
@@ -326,6 +333,9 @@ const char *UndoHistory::AppendAction(ActionType at, Sci::Position position, con
 		actions.PushBack();
 	} else {
 		actions.Truncate(currentAction+1);
+	}
+	if (lengthData > 0 && (data[0] == '\n' || data[0] == '\r' || data[0] == ' ' || data[0] == '\t')) {
+		mayCoalesce = false;
 	}
 	actions.Create(currentAction, at, position, lengthData, mayCoalesce);
 	currentAction++;

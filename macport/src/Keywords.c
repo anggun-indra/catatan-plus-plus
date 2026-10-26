@@ -539,6 +539,13 @@ static const KwLang kLangKw[] = {
 };
 
 const char *KeywordsForLang(const char *lang, int list) {
+    if (!lang) return NULL;
+    if (strcmp(lang, "mermaid") == 0 && list == 0) {
+        return "graph flowchart sequenceDiagram classDiagram stateDiagram erDiagram gantt pie gitGraph mindmap journey timeline quadrantChart c4Context subgraph end participant actor activate deactivate note loop alt else opt par rect critical break over to right left of";
+    }
+    if (strcmp(lang, "plantuml") == 0 && list == 0) {
+        return "startuml enduml startmindmap endmindmap startwbs endwbs class interface enum abstract package namespace node database cloud actor participant boundary control entity queue skinparam title header footer legend autonumber note group loop alt else opt par critical break return as is";
+    }
     for (size_t i = 0; i < sizeof(kLangKw) / sizeof(kLangKw[0]); i++) {
         if (strcmp(kLangKw[i].lang, lang) != 0) continue;
         for (int j = 0; j < kLangKw[i].count; j++)
@@ -550,6 +557,11 @@ const char *KeywordsForLang(const char *lang, int list) {
 }
 
 const char *LexerIdForLang(const char *lang) {
+    if (!lang) return NULL;
+    if (strcmp(lang, "markdown") == 0) return "markdown";
+    if (strcmp(lang, "mermaid") == 0) return "props";
+    if (strcmp(lang, "plantuml") == 0) return "props";
+    if (strncmp(lang, "udl_", 4) == 0) return "cpp";
     for (size_t i = 0; i < sizeof(kLangKw) / sizeof(kLangKw[0]); i++)
         if (strcmp(kLangKw[i].lang, lang) == 0) return kLangKw[i].lexer;
     return NULL;

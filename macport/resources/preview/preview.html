@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Catatan++ Previewer</title>
+  <script src="marked.min.js"></script>
+  <script src="mermaid.min.js"></script>
+  <script src="turndown.js"></script>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --fg: #1f2328;
+      --border: #d0d7de;
+      --code-bg: #f6f8fa;
+      --accent: #059669;
+      --accent-hover: #047857;
+      --link: #0969da;
+      --blockquote: #656d76;
+      --bar-bg: rgba(255, 255, 255, 0.88);
+      --btn-bg: #f3f4f6;
+      --btn-hover: #e5e7eb;
+      --seg-active-bg: #ffffff;
+      --seg-active-fg: #111827;
+      --shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1e1e1e;
+        --fg: #e6edf3;
+        --border: #30363d;
+        --code-bg: #161b22;
+        --accent: #10b981;
+        --accent-hover: #34d399;
+        --link: #58a6ff;
+        --blockquote: #8b949e;
+        --bar-bg: rgba(30, 30, 30, 0.88);
+        --btn-bg: #2d333b;
+        --btn-hover: #373e47;
+        --seg-active-bg: #444c56;
+        --seg-active-fg: #f0f6fc;
+        --shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+      }
+    }
+    * {
+      box-sizing: border-box;
+    }
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--fg);
+      background-color: var(--bg);
+      word-wrap: break-word;
+      transition: background-color 0.2s, color 0.2s;
+      overflow-x: hidden;
+      overflow-y: auto;
+    }
+
+    /* Floating Top Navigation Toolbar */
+    .top-bar {
+      position: sticky;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 14px;
+      background: var(--bar-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--border);
+      gap: 10px;
+      user-select: none;
+    }
+    .bar-group-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .bar-group-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: var(--btn-bg);
+      border: 1px solid var(--border);
+      color: var(--blockquote);
+    }
+    .badge-edit {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: rgba(16, 185, 129, 0.08);
+      cursor: pointer;
+    }
+
+    .btn {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: var(--btn-bg);
+      color: var(--fg);
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.15s ease;
+      white-space: nowrap;
+    }
+    .btn:hover {
+      background: var(--btn-hover);
+    }
+    .btn:active {
+      transform: scale(0.97);
+    }
+    .btn.active {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: var(--accent);
+    }
+
+    /* Segmented Control (VS Code style view switch) */
+    .segmented-control {
+      display: inline-flex;
+      align-items: center;
+      background: var(--btn-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 2px;
+      gap: 2px;
+    }
+    .seg-btn {
+      border: none;
+      background: transparent;
+      color: var(--blockquote);
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 11.5px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s ease;
+    }
+    .seg-btn:hover {
+      color: var(--fg);
+    }
+    .seg-btn.active {
+      background: var(--seg-active-bg);
+      color: var(--seg-active-fg);
+      font-weight: 600;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .btn-close {
+      padding: 4px 7px;
+      font-size: 11px;
+      line-height: 1;
+      border-radius: 6px;
+    }
+
+    /* Document Container */
+    #content-wrapper {
+      padding: 20px 24px 80px 24px;
+      width: 100%;
+      min-height: calc(100% - 44px);
+      box-sizing: border-box;
+      max-width: 980px;
+      margin: 0 auto;
+    }
+
+    #content {
+      min-height: 200px;
+      outline: none;
+    }
+    #content[contenteditable="true"] {
+      cursor: text;
+      border-radius: 6px;
+      transition: outline 0.15s ease;
+    }
+    #content[contenteditable="true"]:focus {
+      outline: 2px solid rgba(16, 185, 129, 0.35);
+      outline-offset: 4px;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 24px;
+      margin-bottom: 16px;
+      font-weight: 600;
+      line-height: 1.25;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.3em;
+    }
+    h1 { font-size: 2em; }
+    h2 { font-size: 1.5em; }
+    h3 { font-size: 1.25em; }
+    p, ul, ol, dl, table, pre { margin-top: 0; margin-bottom: 16px; }
+    a { color: var(--link); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code {
+      padding: 0.2em 0.4em;
+      margin: 0;
+      font-size: 85%;
+      background-color: var(--code-bg);
+      border-radius: 6px;
+      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+    }
+    pre {
+      padding: 16px;
+      overflow: auto;
+      font-size: 85%;
+      line-height: 1.45;
+      background-color: var(--code-bg);
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+    pre code { padding: 0; background-color: transparent; }
+    blockquote {
+      padding: 0 1em;
+      color: var(--blockquote);
+      border-left: 0.25em solid var(--border);
+      margin: 0 0 16px 0;
+    }
+    table {
+      border-spacing: 0;
+      border-collapse: collapse;
+      margin-bottom: 16px;
+      width: 100%;
+      overflow: auto;
+      display: block;
+    }
+    table th, table td {
+      padding: 6px 13px;
+      border: 1px solid var(--border);
+    }
+    table tr:nth-child(2n) {
+      background-color: var(--code-bg);
+    }
+    hr {
+      height: 0.25em;
+      padding: 0;
+      margin: 24px 0;
+      background-color: var(--border);
+      border: 0;
+    }
+    img { max-width: 100%; box-sizing: content-box; }
+
+    .diagram-container {
+      margin: 20px 0;
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background-color: var(--code-bg);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 60px;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .diagram-container svg {
+      max-width: 100%;
+      height: auto;
+    }
+    .diagram-error {
+      color: #ef4444;
+      font-family: monospace;
+      font-size: 12px;
+      white-space: pre-wrap;
+      padding: 8px 12px;
+      background: rgba(239, 68, 68, 0.1);
+      border-radius: 4px;
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      width: 100%;
+      box-sizing: border-box;
+    }
+  </style>
+</head>
+<body>
+  <div class="top-bar">
+    <div class="bar-group-left">
+      <span id="doc-type-badge" class="badge">Markdown</span>
+      <span id="edit-badge" class="badge badge-edit" title="Click to toggle in-place editing">● Direct Edit Active</span>
+    </div>
+    <div class="bar-group-right">
+      <button id="btn-toggle-edit" class="btn active" title="Toggle editing directly in the preview">✎ Edit Mode</button>
+      <div class="segmented-control">
+        <button id="btn-split" class="seg-btn active" title="Side by side split (Editor + Preview)">◨ Split</button>
+        <button id="btn-full" class="seg-btn" title="Full window preview">⛶ Full</button>
+      </div>
+      <button id="btn-close" class="btn btn-close" title="Close Preview">✕</button>
+    </div>
+  </div>
+
+  <div id="content-wrapper">
+    <div id="content" contenteditable="true"></div>
+  </div>
+
+  <script>
+    // State variables
+    let currentDocType = 'markdown';
+    let isEditModeActive = true;
+    let isUserInputting = false;
+    let lastRenderedText = '';
+    let renderCounter = 0;
+    let debounceTimer = null;
+
+    // Initialize Mermaid
+    const isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    if (window.mermaid) {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: isDark ? 'dark' : 'default',
+        securityLevel: 'loose',
+        flowchart: { useMaxWidth: true, htmlLabels: true },
+        sequence: { useMaxWidth: true },
+        themeVariables: isDark ? {
+          darkMode: true,
+          background: '#161b22',
+          primaryColor: '#059669',
+          primaryTextColor: '#ffffff',
+          primaryBorderColor: '#10b981',
+          lineColor: '#58a6ff'
+        } : {
+          primaryColor: '#e6fffa',
+          primaryTextColor: '#022c22',
+          primaryBorderColor: '#059669',
+          lineColor: '#0969da'
+        }
+      });
+    }
+
+    // Configure Marked
+    if (window.marked) {
+      marked.setOptions({
+        gfm: true,
+        breaks: true,
+        headerIds: true,
+        mangle: false
+      });
+    }
+
+    // Configure Turndown for HTML -> Markdown conversion
+    let turndownService = null;
+    if (window.TurndownService) {
+      turndownService = new TurndownService({
+        headingStyle: 'atx',
+        codeBlockStyle: 'fenced',
+        bulletListMarker: '-',
+        emDelimiter: '*'
+      });
+
+      // Preserve diagram blocks with original code
+      turndownService.addRule('diagramContainers', {
+        filter: function(node) {
+          return node.classList && node.classList.contains('diagram-container') && node.hasAttribute('data-code');
+        },
+        replacement: function(content, node) {
+          const lang = node.getAttribute('data-lang') || 'mermaid';
+          const code = node.getAttribute('data-code') || '';
+          return '\n\n```' + lang + '\n' + code.trim() + '\n```\n\n';
+        }
+      });
+
+      // Support GFM Markdown Tables
+      turndownService.addRule('tables', {
+        filter: 'table',
+        replacement: function (content, node) {
+          const rows = Array.from(node.querySelectorAll('tr'));
+          if (rows.length === 0) return '';
+          let out = '\n\n';
+          let colCount = 0;
+          rows.forEach((row, i) => {
+            const cells = Array.from(row.querySelectorAll('th, td'));
+            if (i === 0) colCount = cells.length;
+            const line = '| ' + cells.map(c => c.textContent.trim().replace(/\|/g, '\\|')).join(' | ') + ' |';
+            out += line + '\n';
+            if (i === 0) {
+              out += '| ' + Array(colCount).fill('---').join(' | ') + ' |\n';
+            }
+          });
+          return out + '\n';
+        }
+      });
+
+      // Support Checkboxes / Task lists
+      turndownService.addRule('taskLists', {
+        filter: function (node) {
+          return node.type === 'checkbox' && node.parentNode && node.parentNode.nodeName === 'LI';
+        },
+        replacement: function (content, node) {
+          return (node.checked ? '[x] ' : '[ ] ');
+        }
+      });
+    }
+
+    // Convert DOM in #content to clean Markdown
+    function convertDomToMarkdown() {
+      const contentEl = document.getElementById('content');
+      if (!turndownService || !contentEl) return '';
+      return turndownService.turndown(contentEl.innerHTML);
+    }
+
+    // Send updated content to Cocoa host
+    function notifyCocoaContentChanged() {
+      const md = convertDomToMarkdown();
+      lastRenderedText = md;
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.catatan) {
+        window.webkit.messageHandlers.catatan.postMessage({
+          type: 'contentChanged',
+          markdown: md
+        });
+      }
+    }
+
+    // Setup input listener for live editing
+    const contentEl = document.getElementById('content');
+    contentEl.addEventListener('input', function() {
+      if (!isEditModeActive) return;
+      isUserInputting = true;
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        notifyCocoaContentChanged();
+        isUserInputting = false;
+      }, 160);
+    });
+
+    contentEl.addEventListener('blur', function() {
+      if (isUserInputting) {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        notifyCocoaContentChanged();
+        isUserInputting = false;
+      }
+    });
+
+    // PlantUML 64-bit encoding helper
+    function encode64(data) {
+      let r = "";
+      for (let i = 0; i < data.length; i += 3) {
+        if (i + 2 == data.length) {
+          r += append3bytes(data.charCodeAt(i), data.charCodeAt(i + 1), 0);
+        } else if (i + 1 == data.length) {
+          r += append3bytes(data.charCodeAt(i), 0, 0);
+        } else {
+          r += append3bytes(data.charCodeAt(i), data.charCodeAt(i + 1), data.charCodeAt(i + 2));
+        }
+      }
+      return r;
+    }
+
+    function append3bytes(b1, b2, b3) {
+      const c1 = b1 >> 2;
+      const c2 = ((b1 & 0x3) << 4) | (b2 >> 4);
+      const c3 = ((b2 & 0xF) << 2) | (b3 >> 6);
+      const c4 = b3 & 0x3F;
+      return encode6bit(c1 & 0x3F) + encode6bit(c2 & 0x3F) + encode6bit(c3 & 0x3F) + encode6bit(c4 & 0x3F);
+    }
+
+    function encode6bit(b) {
+      if (b < 10) return String.fromCharCode(48 + b);
+      b -= 10;
+      if (b < 26) return String.fromCharCode(65 + b);
+      b -= 26;
+      if (b < 26) return String.fromCharCode(97 + b);
+      b -= 26;
+      if (b == 0) return '-';
+      if (b == 1) return '_';
+      return '?';
+    }
+
+    // Convert PlantUML syntax to Mermaid for offline rendering
+    function plantUmlToMermaid(text) {
+      const clean = text.replace(/@startuml\s*/gi, '').replace(/@enduml\s*/gi, '').trim();
+      const lines = clean.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith("'"));
+      
+      const hasArrows = lines.some(l => l.includes('->') || l.includes('-->') || l.includes('->>') || l.includes('-->>'));
+      const hasClass = lines.some(l => l.startsWith('class ') || l.startsWith('interface ') || l.includes('<|--'));
+      const hasState = lines.some(l => l.includes('[*]') || l.startsWith('state '));
+
+      if (hasState) {
+        let out = ["stateDiagram-v2"];
+        for (const l of lines) {
+          if (l.includes('-->') || l.includes('->')) {
+            out.push("  " + l.replace('-->', '-->').replace('->', '-->'));
+          } else if (l.startsWith('state ')) {
+            out.push("  " + l);
+          }
+        }
+        return out.join('\n');
+      }
+
+      if (hasClass) {
+        let out = ["classDiagram"];
+        for (const l of lines) {
+          if (l.includes('<|--') || l.includes('*--') || l.includes('o--')) {
+            out.push("  " + l);
+          } else if (l.startsWith('class ') || l.startsWith('interface ')) {
+            out.push("  " + l);
+          }
+        }
+        return out.join('\n');
+      }
+
+      if (hasArrows) {
+        let out = ["sequenceDiagram"];
+        for (const l of lines) {
+          if (l.startsWith('autonumber')) {
+            out.push("  autonumber");
+          } else if (l.startsWith('participant ') || l.startsWith('actor ')) {
+            out.push("  " + l);
+          } else if (l.includes('->') || l.includes('-->')) {
+            let m = l.replace('-->', '-->>').replace('->', '->>');
+            out.push("  " + m);
+          } else if (l.startsWith('note ') || l.startsWith('alt ') || l.startsWith('else') || l.startsWith('end') || l.startsWith('loop ') || l.startsWith('opt ')) {
+            out.push("  " + l);
+          }
+        }
+        return out.join('\n');
+      }
+
+      let out = ["flowchart TD"];
+      for (const l of lines) {
+        if (l.includes('-->') || l.includes('->')) {
+          out.push("  " + l.replace('-->', '-->').replace('->', '-->'));
+        }
+      }
+      return out.join('\n');
+    }
+
+    // Toggle direct editing mode
+    function setEditMode(enable) {
+      isEditModeActive = enable;
+      const content = document.getElementById('content');
+      const badge = document.getElementById('edit-badge');
+      const btn = document.getElementById('btn-toggle-edit');
+      
+      content.setAttribute('contenteditable', enable ? 'true' : 'false');
+      if (enable) {
+        badge.textContent = '● Direct Edit Active';
+        badge.className = 'badge badge-edit';
+        btn.className = 'btn active';
+      } else {
+        badge.textContent = '👁 View Only';
+        badge.className = 'badge';
+        btn.className = 'btn';
+      }
+    }
+
+    // Set preview layout mode (called from UI or Cocoa)
+    function setLayoutMode(mode) {
+      const btnSplit = document.getElementById('btn-split');
+      const btnFull = document.getElementById('btn-full');
+      if (mode === 'full') {
+        btnSplit.classList.remove('active');
+        btnFull.classList.add('active');
+      } else {
+        btnFull.classList.remove('active');
+        btnSplit.classList.add('active');
+      }
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.catatan) {
+        window.webkit.messageHandlers.catatan.postMessage({
+          type: 'setLayoutMode',
+          mode: mode
+        });
+      }
+    }
+    window.setLayoutMode = setLayoutMode;
+
+    // Button event listeners
+    document.getElementById('btn-toggle-edit').addEventListener('click', () => {
+      setEditMode(!isEditModeActive);
+    });
+    document.getElementById('edit-badge').addEventListener('click', () => {
+      setEditMode(!isEditModeActive);
+    });
+    document.getElementById('btn-split').addEventListener('click', () => {
+      setLayoutMode('split');
+    });
+    document.getElementById('btn-full').addEventListener('click', () => {
+      setLayoutMode('full');
+    });
+    document.getElementById('btn-close').addEventListener('click', () => {
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.catatan) {
+        window.webkit.messageHandlers.catatan.postMessage({ type: 'closePreview' });
+      }
+    });
+
+    // Main update entrypoint called by Cocoa host
+    async function updateContent(rawText, docType) {
+      const container = document.getElementById('content');
+      const badge = document.getElementById('doc-type-badge');
+      const editBtn = document.getElementById('btn-toggle-edit');
+      const editBadge = document.getElementById('edit-badge');
+
+      // If user is currently typing inside the editor, do not clobber their DOM
+      if (isUserInputting || (document.activeElement === container || container.contains(document.activeElement))) {
+        if (rawText === lastRenderedText) return;
+      }
+
+      lastRenderedText = rawText || '';
+      currentDocType = (docType || '').toLowerCase();
+
+      if (!rawText || rawText.trim() === '') {
+        container.innerHTML = '<p style="color:var(--blockquote); font-style:italic;">Document is empty.</p>';
+        badge.textContent = 'Empty';
+        return;
+      }
+
+      // Mode 1: Standalone Mermaid (.mermaid, .mmd)
+      if (currentDocType.includes('mermaid') || rawText.trim().startsWith('graph ') || rawText.trim().startsWith('flowchart ') || rawText.trim().startsWith('sequenceDiagram') || rawText.trim().startsWith('classDiagram') || rawText.trim().startsWith('stateDiagram') || rawText.trim().startsWith('erDiagram')) {
+        badge.textContent = 'Mermaid';
+        setEditMode(false);
+        editBtn.style.display = 'none';
+        editBadge.style.display = 'none';
+        try {
+          const id = 'mermaid-standalone-' + (++renderCounter);
+          const { svg } = await mermaid.render(id, rawText.trim());
+          container.innerHTML = '<div class="diagram-container" contenteditable="false">' + svg + '</div>';
+        } catch (err) {
+          container.innerHTML = '<div class="diagram-error" contenteditable="false">Mermaid Syntax Error:\n' + (err.message || err) + '</div><pre><code>' + escapeHtml(rawText) + '</code></pre>';
+        }
+        return;
+      }
+
+      // Mode 2: Standalone PlantUML (.puml, .plantuml, .iuml)
+      if (currentDocType.includes('plantuml') || currentDocType.includes('puml') || rawText.includes('@startuml')) {
+        badge.textContent = 'PlantUML';
+        setEditMode(false);
+        editBtn.style.display = 'none';
+        editBadge.style.display = 'none';
+        const cleanPuml = rawText.trim();
+        const onlineImgUrl = 'https://www.plantuml.com/plantuml/svg/~1' + encode64(cleanPuml);
+        const mermaidCode = plantUmlToMermaid(cleanPuml);
+        
+        let offlineSvg = '';
+        try {
+          const id = 'puml-offline-' + (++renderCounter);
+          const res = await mermaid.render(id, mermaidCode);
+          offlineSvg = res.svg;
+        } catch (e) {
+          offlineSvg = '<div class="diagram-error">PlantUML: ' + escapeHtml(cleanPuml) + '</div>';
+        }
+
+        container.innerHTML = `
+          <div class="diagram-container" contenteditable="false">
+            <img src="${onlineImgUrl}" onerror="this.style.display='none'; document.getElementById('puml-offline-view').style.display='block';" alt="PlantUML Diagram" style="max-width:100%;">
+            <div id="puml-offline-view" style="display:none; width:100%;">
+              ${offlineSvg}
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      // Mode 3: Markdown (.md, .markdown) - Supports direct editing!
+      badge.textContent = 'Markdown';
+      editBtn.style.display = 'inline-flex';
+      editBadge.style.display = 'inline-flex';
+      setEditMode(true);
+
+      try {
+        const rawHtml = marked.parse(rawText);
+        container.innerHTML = rawHtml;
+
+        // Process any embedded ```mermaid blocks
+        const mermaidBlocks = container.querySelectorAll('pre code.language-mermaid');
+        for (let i = 0; i < mermaidBlocks.length; i++) {
+          const block = mermaidBlocks[i];
+          const code = block.textContent;
+          const pre = block.parentElement;
+          const diagDiv = document.createElement('div');
+          diagDiv.className = 'diagram-container';
+          diagDiv.setAttribute('contenteditable', 'false');
+          diagDiv.setAttribute('data-lang', 'mermaid');
+          diagDiv.setAttribute('data-code', code);
+          try {
+            const id = 'mermaid-block-' + (++renderCounter) + '-' + i;
+            const { svg } = await mermaid.render(id, code.trim());
+            diagDiv.innerHTML = svg;
+            pre.replaceWith(diagDiv);
+          } catch (e) {
+            diagDiv.innerHTML = '<div class="diagram-error">Mermaid Error: ' + (e.message || e) + '</div><pre><code>' + escapeHtml(code) + '</code></pre>';
+            pre.replaceWith(diagDiv);
+          }
+        }
+
+        // Process any embedded ```plantuml or @startuml blocks
+        const pumlBlocks = container.querySelectorAll('pre code.language-plantuml, pre code.language-puml');
+        for (let i = 0; i < pumlBlocks.length; i++) {
+          const block = pumlBlocks[i];
+          const code = block.textContent;
+          const pre = block.parentElement;
+          const diagDiv = document.createElement('div');
+          diagDiv.className = 'diagram-container';
+          diagDiv.setAttribute('contenteditable', 'false');
+          diagDiv.setAttribute('data-lang', 'plantuml');
+          diagDiv.setAttribute('data-code', code);
+          
+          const onlineImgUrl = 'https://www.plantuml.com/plantuml/svg/~1' + encode64(code.trim());
+          const mermaidCode = plantUmlToMermaid(code.trim());
+          let offlineSvg = '';
+          try {
+            const id = 'puml-block-' + (++renderCounter) + '-' + i;
+            const res = await mermaid.render(id, mermaidCode);
+            offlineSvg = res.svg;
+          } catch(e) {
+            offlineSvg = '<div class="diagram-error">PlantUML error: ' + escapeHtml(e.message || e) + '</div>';
+          }
+
+          diagDiv.innerHTML = `
+            <img src="${onlineImgUrl}" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';" alt="PlantUML Diagram" style="max-width:100%;">
+            <div style="display:none; width:100%;">${offlineSvg}</div>
+          `;
+          pre.replaceWith(diagDiv);
+        }
+      } catch (err) {
+        container.innerHTML = '<div class="diagram-error">Markdown Render Error: ' + (err.message || err) + '</div>';
+      }
+    }
+    window.updateContent = updateContent;
+
+    function escapeHtml(str) {
+      return (str || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+  </script>
+</body>
+</html>

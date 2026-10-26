@@ -73,6 +73,7 @@ static const NSInteger kItemCount = (NSInteger)(sizeof(kItems) / sizeof(kItems[0
 @implementation ToolbarView {
     NSMutableArray<NSValue *> *_rects;      // one per item, NSZeroRect for separators
     NSMutableArray *_icons;
+    NSMutableArray *_whiteIcons;
     NSInteger _hoverIndex;
     NSInteger _pressedIndex;
 }
@@ -82,9 +83,13 @@ static const NSInteger kItemCount = (NSInteger)(sizeof(kItems) / sizeof(kItems[0
     if (self) {
         _rects = [NSMutableArray array];
         _icons = [NSMutableArray array];
+        _whiteIcons = [NSMutableArray array];
         _hoverIndex = -1;
         _pressedIndex = -1;
-        for (NSInteger i = 0; i < kItemCount; i++) [_icons addObject:[NSNull null]];
+        for (NSInteger i = 0; i < kItemCount; i++) {
+            [_icons addObject:[NSNull null]];
+            [_whiteIcons addObject:[NSNull null]];
+        }
         [self setAutoresizingMask:NSViewWidthSizable];
         [self addTrackingArea:[[NSTrackingArea alloc]
             initWithRect:NSZeroRect
@@ -100,7 +105,10 @@ static const NSInteger kItemCount = (NSInteger)(sizeof(kItems) / sizeof(kItems[0
 
 - (void)setResourceDirectory:(NSString *)dir {
     _resourceDirectory = [dir copy];
-    for (NSInteger i = 0; i < kItemCount; i++) [_icons replaceObjectAtIndex:i withObject:[NSNull null]];
+    for (NSInteger i = 0; i < kItemCount; i++) {
+        [_icons replaceObjectAtIndex:i withObject:[NSNull null]];
+        [_whiteIcons replaceObjectAtIndex:i withObject:[NSNull null]];
+    }
     [self refresh];
 }
 
@@ -121,6 +129,24 @@ static const NSInteger kItemCount = (NSInteger)(sizeof(kItems) / sizeof(kItems[0
     }
     _icons[index] = image ?: (id)[NSNull null];
     return image;
+}
+
+- (NSImage *)whiteIconAtIndex:(NSInteger)index {
+    id cached = _whiteIcons[index];
+    if (cached != [NSNull null]) return cached;
+
+    NSImage *base = [self iconAtIndex:index];
+    if (!base) return nil;
+
+    NSImage *whiteIcon = [NSImage imageWithSize:base.size flipped:YES drawingHandler:^BOOL(NSRect dstRect) {
+        [base drawInRect:dstRect fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
+        [[NSColor whiteColor] setFill];
+        NSRectFillUsingOperation(dstRect, NSCompositingOperationSourceAtop);
+        return YES;
+    }];
+    [whiteIcon setTemplate:NO];
+    _whiteIcons[index] = whiteIcon;
+    return whiteIcon;
 }
 
 - (void)recomputeLayout {
@@ -181,7 +207,7 @@ static const NSInteger kItemCount = (NSInteger)(sizeof(kItems) / sizeof(kItems[0
         if (toggled) {
             NSBezierPath *p = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(r, 1, 1)
                                                              xRadius:5 yRadius:5];
-            [[NSColor selectedContentBackgroundColor] setFill];
+            [[NSColor controlAccentColor] setFill];
             [p fill];
         } else if (i == _pressedIndex) {
             NSBezierPath *p = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(r, 1, 1)
@@ -214,25 +240,17 @@ static const NSInteger kItemCount = (NSInteger)(sizeof(kItems) / sizeof(kItems[0
             continue;
         }
 
-        // Toggled buttons get a contrasting glyph against the accent fill.
+        // Toggled buttons get a crisp white glyph against the accent fill.
         if (toggled) {
-            NSImage *knockout = [icon copy];
-            [knockout setTemplate:YES];
-            [NSGraphicsContext saveGraphicsState];
-            CGContextRef cg = [NSGraphicsContext currentContext].CGContext;
-            CGContextSetBlendMode(cg, kCGBlendModeDestinationOut);
-            [knockout drawInRect:iconRect
-                        fromRect:NSZeroRect
-                       operation:NSCompositingOperationSourceOver
-                        fraction:1.0
-                  respectFlipped:YES
-                           hints:nil];
-            [NSGraphicsContext restoreGraphicsState];
-            [NSGraphicsContext saveGraphicsState];
-            CGContextSetBlendMode(cg, kCGBlendModeNormal);
-            [[NSColor whiteColor] setFill];
-            NSRectFillUsingOperation(iconRect, NSCompositingOperationSourceOver);
-            [NSGraphicsContext restoreGraphicsState];
+            NSImage *whiteIcon = [self whiteIconAtIndex:i];
+            if (whiteIcon) {
+                [whiteIcon drawInRect:iconRect
+                             fromRect:NSZeroRect
+                            operation:NSCompositingOperationSourceOver
+                             fraction:1.0
+                       respectFlipped:YES
+                                hints:nil];
+            }
             continue;
         }
 

@@ -109,18 +109,79 @@ static const CGFloat kBottomMargin = 48.0;
     NSInteger first = (page - 1) * perPage;
     if (first >= (NSInteger)self.lines.count) return;
 
-    NSDictionary *attrs = @{
-        NSFontAttributeName: [NSFont fontWithName:kPrintFontName size:kPrintFontSize]
-                             ?: [NSFont userFixedPitchFontOfSize:kPrintFontSize],
+    NSFont *baseFont = [NSFont fontWithName:kPrintFontName size:kPrintFontSize]
+                       ?: [NSFont userFixedPitchFontOfSize:kPrintFontSize];
+    NSDictionary *defaultAttrs = @{
+        NSFontAttributeName: baseFont,
         NSForegroundColorAttributeName: [NSColor blackColor],
     };
+
+    NSMutableDictionary<NSNumber *, NSDictionary *> *styleCache = [NSMutableDictionary dictionary];
+    long sciLength = self.editor ? [self.editor getGeneralProperty:SCI_GETLENGTH parameter:0] : 0;
 
     CGFloat y = kTopMargin;
     NSInteger last = MIN((NSInteger)self.lines.count, first + perPage);
     for (NSInteger i = first; i < last; i++) {
         NSString *line = self.lines[i];
-        if (line.length)
-            [line drawAtPoint:NSMakePoint(kSideMargin, y) withAttributes:attrs];
+        if (line.length == 0) {
+            y += kPrintLineHeight;
+            continue;
+        }
+
+        NSAttributedString *drawString = nil;
+        long lineStartPos = self.editor ? [self.editor getGeneralProperty:SCI_POSITIONFROMLINE parameter:i] : -1;
+
+        if (self.editor && lineStartPos >= 0 && lineStartPos < sciLength) {
+            NSMutableAttributedString *attrLine = [[NSMutableAttributedString alloc] initWithString:line attributes:defaultAttrs];
+            NSUInteger strCharIndex = 0;
+            NSUInteger byteOffset = 0;
+            NSData *lineUtf8Data = [line dataUsingEncoding:NSUTF8StringEncoding];
+            NSUInteger utf8Len = lineUtf8Data.length;
+
+            while (byteOffset < utf8Len && (lineStartPos + (long)byteOffset) < sciLength && strCharIndex < line.length) {
+                long pos = lineStartPos + (long)byteOffset;
+                int style = (int)[self.editor getGeneralProperty:SCI_GETSTYLEAT parameter:pos];
+
+                NSDictionary *attrs = styleCache[@(style)];
+                if (!attrs) {
+                    NSColor *fg = [self.editor getColorProperty:SCI_STYLEGETFORE parameter:style];
+                    if (!fg) {
+                        fg = [NSColor blackColor];
+                    } else if (fg.brightnessComponent > 0.88) {
+                        // Invert near-white colours so text is visible on white paper
+                        fg = [NSColor colorWithCalibratedWhite:0.25 alpha:1.0];
+                    }
+                    BOOL bold = [self.editor getGeneralProperty:SCI_STYLEGETBOLD parameter:style] != 0;
+                    BOOL italic = [self.editor getGeneralProperty:SCI_STYLEGETITALIC parameter:style] != 0;
+                    NSFont *font = baseFont;
+                    if (bold || italic) {
+                        NSFontManager *fm = [NSFontManager sharedFontManager];
+                        NSFontTraitMask traits = 0;
+                        if (bold) traits |= NSBoldFontMask;
+                        if (italic) traits |= NSItalicFontMask;
+                        NSFont *styledFont = [fm convertFont:font toHaveTrait:traits];
+                        if (styledFont) font = styledFont;
+                    }
+                    attrs = @{
+                        NSFontAttributeName: font,
+                        NSForegroundColorAttributeName: fg,
+                    };
+                    styleCache[@(style)] = attrs;
+                }
+
+                NSRange charRange = [line rangeOfComposedCharacterSequenceAtIndex:strCharIndex];
+                [attrLine setAttributes:attrs range:charRange];
+
+                NSData *charData = [[line substringWithRange:charRange] dataUsingEncoding:NSUTF8StringEncoding];
+                byteOffset += charData.length;
+                strCharIndex += charRange.length;
+            }
+            drawString = attrLine;
+        } else {
+            drawString = [[NSAttributedString alloc] initWithString:line attributes:defaultAttrs];
+        }
+
+        [drawString drawAtPoint:NSMakePoint(kSideMargin, y)];
         y += kPrintLineHeight;
     }
 

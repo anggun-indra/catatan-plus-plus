@@ -3344,7 +3344,7 @@ void Editor::NewLine() {
 		sel.DropAdditionalRanges();
 	}
 
-	UndoGroup ug(pdoc, !sel.Empty() || (sel.Count() > 1));
+	UndoGroup ug(pdoc, true);
 
 	// Clear each range
 	if (!sel.Empty()) {

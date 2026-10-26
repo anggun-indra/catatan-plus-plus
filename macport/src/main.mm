@@ -10,6 +10,11 @@
 #import "Toolbar.h"
 #import "Sidebar.h"
 #import "PrintView.h"
+#import <WebKit/WebKit.h>
+#import "FindInFiles.h"
+#import "ColumnEditor.h"
+#import "UDLManager.h"
+#import "AutoUpdater.h"
 
 typedef struct {
     int message;
@@ -58,6 +63,7 @@ static NSColor *HexColor(unsigned rgb) {
 @protocol TabStripViewDelegate <NSObject>
 - (void)tabStrip:(TabStripView *)strip didSelectIndex:(NSInteger)index;
 - (void)tabStrip:(TabStripView *)strip didCloseIndex:(NSInteger)index;
+- (NSMenu *)tabStrip:(TabStripView *)strip menuForTabIndex:(NSInteger)index;
 @end
 
 @interface TabStripView : NSView
@@ -206,6 +212,28 @@ static const CGFloat kCloseSize = 16.0;
     }
 }
 
+- (NSMenu *)menuForEvent:(NSEvent *)event {
+    NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+    [self recomputeLayout];
+
+    NSInteger clickedIndex = -1;
+    for (NSUInteger i = 0; i < _tabRects.count; i++) {
+        NSRect tab = _tabRects[i].rectValue;
+        if (NSPointInRect(p, tab)) {
+            clickedIndex = (NSInteger)i;
+            break;
+        }
+    }
+
+    if (clickedIndex >= 0) {
+        [self.tabDelegate tabStrip:self didSelectIndex:clickedIndex];
+        if ([self.tabDelegate respondsToSelector:@selector(tabStrip:menuForTabIndex:)]) {
+            return [self.tabDelegate tabStrip:self menuForTabIndex:clickedIndex];
+        }
+    }
+    return [super menuForEvent:event];
+}
+
 @end
 
 #pragma mark - Document
@@ -216,10 +244,16 @@ static const CGFloat kCloseSize = 16.0;
 @property (nonatomic) BOOL dirty;
 @property (nonatomic, strong) ScintillaView *editor;
 @property (nonatomic, strong) DocNotifier *notifier;
+@property (nonatomic) long lastCaretPos;
+@property (nonatomic) NSTimeInterval lastCharTypedTime;
+@property (nonatomic, strong) NSTimer *undoBreakTimer;
 - (NSString *)displayName;
 @end
 
 @implementation EditorDocument
+- (void)dealloc {
+    [_undoBreakTimer invalidate];
+}
 - (NSString *)displayName {
     return self.path ? self.path.lastPathComponent : @"untitled";
 }
@@ -227,10 +261,22 @@ static const CGFloat kCloseSize = 16.0;
 
 #pragma mark - Application
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, TabStripViewDelegate, ToolbarViewDelegate, SidebarViewDelegate>
+typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
+    PreviewLayoutSideBySide = 0,
+    PreviewLayoutFullPreview = 1
+};
+
+@interface AppDelegate : NSObject <NSApplicationDelegate, TabStripViewDelegate, ToolbarViewDelegate, SidebarViewDelegate, FindInFilesDelegate, NSWindowDelegate, WKScriptMessageHandler, NSMenuDelegate, AutoUpdaterDelegate>
 @property (nonatomic, strong) NSWindow *window;
+@property (nonatomic, strong) NSMenuItem *updateMenuItem;
 @property (nonatomic, strong) ToolbarView *toolbar;
 @property (nonatomic, strong) SidebarView *sidebar;
+@property (nonatomic, strong) WKWebView *previewWebView;
+@property (nonatomic) BOOL previewVisible;
+@property (nonatomic) PreviewLayoutMode previewLayoutMode;
+@property (nonatomic) BOOL isSyncingFromPreview;
+@property (nonatomic, strong) FindInFilesWindowController *findInFilesController;
+@property (nonatomic, strong) ColumnEditorController *columnEditorController;
 @property (nonatomic, strong) NSView *contentView;
 @property (nonatomic, copy) NSString *visiblePanelName;
 @property (nonatomic, copy) NSString *workspaceRoot;
@@ -258,9 +304,37 @@ static const CGFloat kCloseSize = 16.0;
 @property (nonatomic, copy) NSString *tailingPath;
 @property (nonatomic, strong) NSDate *tailingStamp;
 @property (nonatomic, strong) NSTimer *tailTimer;
+
+// Find & Replace
+@property (nonatomic, strong) NSPanel *findPanel;
+@property (nonatomic, strong) NSTextField *findField;
+@property (nonatomic, strong) NSTextField *replaceField;
+@property (nonatomic, strong) NSButton *caseCheckbox;
+@property (nonatomic, strong) NSButton *wordCheckbox;
+@property (nonatomic, strong) NSButton *wrapCheckbox;
+@property (nonatomic, strong) NSTextField *findStatus;
+
+// Preferences
+@property (nonatomic, strong) NSWindow *prefsWindow;
+@property (nonatomic, strong) NSPopUpButton *prefFontPop;
+@property (nonatomic, strong) NSPopUpButton *prefSizePop;
+@property (nonatomic, strong) NSPopUpButton *prefTabPop;
+@property (nonatomic, strong) NSButton *prefSpacesCheck;
+@property (nonatomic, strong) NSButton *prefLineNumCheck;
+@property (nonatomic, strong) NSButton *prefWrapCheck;
 @end
 
 @implementation AppDelegate
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _documents = [NSMutableArray array];
+        _pendingPaths = [NSMutableArray array];
+        _activeIndex = -1;
+    }
+    return self;
+}
 
 - (ScintillaView *)editor {
     EditorDocument *doc = [self activeDocument];
@@ -273,13 +347,42 @@ static const CGFloat kCloseSize = 16.0;
     return self.documents[self.activeIndex];
 }
 
+- (NSString *)currentFontName {
+    NSString *f = [[NSUserDefaults standardUserDefaults] stringForKey:@"pref_font"];
+    return f.length > 0 ? f : @"Menlo";
+}
+
+- (NSInteger)currentFontSize {
+    NSInteger s = [[NSUserDefaults standardUserDefaults] integerForKey:@"pref_fontsize"];
+    return s > 0 ? s : 13;
+}
+
+- (NSInteger)currentTabWidth {
+    NSInteger t = [[NSUserDefaults standardUserDefaults] integerForKey:@"pref_tabwidth"];
+    return t > 0 ? t : 4;
+}
+
+- (BOOL)currentUseSpaces {
+    return [[NSUserDefaults standardUserDefaults] objectForKey:@"pref_usespaces"] ?
+           [[NSUserDefaults standardUserDefaults] boolForKey:@"pref_usespaces"] : YES;
+}
+
+- (BOOL)currentWordWrap {
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"pref_wordwrap"];
+}
+
+- (BOOL)currentShowLineNumbers {
+    return [[NSUserDefaults standardUserDefaults] objectForKey:@"pref_linenumbers"] ?
+           [[NSUserDefaults standardUserDefaults] boolForKey:@"pref_linenumbers"] : YES;
+}
+
 #pragma mark Styling
 
 - (void)applyThemeTo:(ScintillaView *)sci lexer:(NSString *)lexerName lang:(NSString *)lang {
     [sci setColorProperty:SCI_STYLESETBACK parameter:STYLE_DEFAULT value:HexColor(0xFFFFFF)];
     [sci setColorProperty:SCI_STYLESETFORE parameter:STYLE_DEFAULT value:HexColor(0x000000)];
-    [sci setGeneralProperty:SCI_STYLESETFONT parameter:STYLE_DEFAULT value:(sptr_t)"Menlo"];
-    [sci setGeneralProperty:SCI_STYLESETSIZE parameter:STYLE_DEFAULT value:13];
+    [sci setGeneralProperty:SCI_STYLESETFONT parameter:STYLE_DEFAULT value:(sptr_t)[[self currentFontName] UTF8String]];
+    [sci setGeneralProperty:SCI_STYLESETSIZE parameter:STYLE_DEFAULT value:[self currentFontSize]];
     [sci setGeneralProperty:SCI_STYLECLEARALL parameter:0 value:0];
 
 
@@ -307,12 +410,12 @@ static const CGFloat kCloseSize = 16.0;
 
     [sci setGeneralProperty:SCI_SETCODEPAGE parameter:SC_CP_UTF8 value:0];
     [sci setGeneralProperty:SCI_SETMARGINTYPEN parameter:0 value:SC_MARGIN_NUMBER];
-    [sci setGeneralProperty:SCI_SETMARGINWIDTHN parameter:0 value:52];
+    [sci setGeneralProperty:SCI_SETMARGINWIDTHN parameter:0 value:[self currentShowLineNumbers] ? 52 : 0];
     [sci setGeneralProperty:SCI_SETMARGINSENSITIVEN parameter:1 value:1];
     [sci setGeneralProperty:SCI_SETFOLDMARGINCOLOUR parameter:1 value:0];
-    [sci setGeneralProperty:SCI_SETWRAPMODE value:SC_WRAP_NONE];
-    [sci setGeneralProperty:SCI_SETTABWIDTH parameter:4 value:0];
-    [sci setGeneralProperty:SCI_SETUSETABS parameter:0 value:0];
+    [sci message:SCI_SETWRAPMODE wParam:[self currentWordWrap] ? SC_WRAP_WORD : SC_WRAP_NONE];
+    [sci setGeneralProperty:SCI_SETTABWIDTH parameter:[self currentTabWidth] value:0];
+    [sci setGeneralProperty:SCI_SETUSETABS parameter:[self currentUseSpaces] ? 0 : 1 value:0];
     // Notepad++ highlights the current line purely by setting the caret-line
     // background (its default is E8E8FF) and letting Scintilla track which line
     // that is. It never recolours the text — that is what kept leaking onto
@@ -330,6 +433,7 @@ static const CGFloat kCloseSize = 16.0;
     [sci setGeneralProperty:SCI_SETADDITIONALSELECTIONTYPING parameter:1 value:1];
 
     [self applyThemeTo:sci lexer:@"cpp" lang:@"cpp"];
+    sci.menu = [self editorContextMenu];
     return sci;
 }
 
@@ -365,6 +469,13 @@ static const CGFloat kCloseSize = 16.0;
         if (map[src] < 0) continue;
         const char *w = KeywordsForLang(lname, src);
         if (w && w[0]) [sci setGeneralProperty:SCI_SETKEYWORDS parameter:map[src] value:(sptr_t)w];
+    }
+
+    if ([lang hasPrefix:@"udl_"]) {
+        UDLLanguage *udl = [[UDLManager sharedManager] languageForName:lang];
+        if (udl && udl.keywords.length > 0) {
+            [sci setGeneralProperty:SCI_SETKEYWORDS parameter:0 value:(sptr_t)[udl.keywords UTF8String]];
+        }
     }
 
     [sci setGeneralProperty:SCI_SETPROPERTY parameter:(sptr_t)"fold" value:(sptr_t)"1"];
@@ -485,6 +596,9 @@ static const CGFloat kCloseSize = 16.0;
 
     self.tabStrip.selectedIndex = index;
     [self updateUI];
+    if (self.previewVisible) {
+        [self schedulePreviewUpdate];
+    }
 }
 
 - (void)closeDocumentAtIndex:(NSInteger)index {
@@ -492,6 +606,10 @@ static const CGFloat kCloseSize = 16.0;
 
     EditorDocument *doc = self.documents[index];
     if (doc.dirty && !self.suppressAlerts && ![self confirmDiscard:doc]) return;
+    if (doc.undoBreakTimer) {
+        [doc.undoBreakTimer invalidate];
+        doc.undoBreakTimer = nil;
+    }
 
     BOOL wasActive = (index == self.activeIndex);
     [self.documents removeObjectAtIndex:index];
@@ -634,6 +752,81 @@ static const CGFloat kCloseSize = 16.0;
                        *flag ? @"on" : @"off"]];
 }
 
+#pragma mark - Undo / Redo Coalescing & Actions
+
+- (void)breakUndoGroupForDocument:(EditorDocument *)doc {
+    if (!doc || !doc.editor) return;
+    if (doc.undoBreakTimer) {
+        [doc.undoBreakTimer invalidate];
+        doc.undoBreakTimer = nil;
+    }
+    [doc.editor setGeneralProperty:SCI_BEGINUNDOACTION parameter:0 value:0];
+    [doc.editor setGeneralProperty:SCI_ENDUNDOACTION parameter:0 value:0];
+}
+
+- (void)scheduleUndoBreakForDocument:(EditorDocument *)doc {
+    if (!doc || !doc.editor) return;
+    if (doc.undoBreakTimer) {
+        [doc.undoBreakTimer invalidate];
+        doc.undoBreakTimer = nil;
+    }
+    __weak AppDelegate *weakSelf = self;
+    __weak EditorDocument *weakDoc = doc;
+    doc.undoBreakTimer = [NSTimer scheduledTimerWithTimeInterval:1.2
+                                                         repeats:NO
+                                                           block:^(NSTimer * _Nonnull timer) {
+        (void)timer;
+        [weakSelf breakUndoGroupForDocument:weakDoc];
+    }];
+}
+
+- (void)undo:(id)sender {
+    (void)sender;
+    [self performUndo];
+}
+
+- (void)redo:(id)sender {
+    (void)sender;
+    [self performRedo];
+}
+
+- (void)performUndo {
+    EditorDocument *doc = [self activeDocument];
+    if (!doc || !doc.editor) return;
+    if (doc.undoBreakTimer) {
+        [doc.undoBreakTimer invalidate];
+        doc.undoBreakTimer = nil;
+    }
+    [doc.editor setGeneralProperty:SCI_UNDO parameter:0 value:0];
+    [self updateStatusText];
+    if (self.previewVisible) [self schedulePreviewUpdate];
+}
+
+- (void)performRedo {
+    EditorDocument *doc = [self activeDocument];
+    if (!doc || !doc.editor) return;
+    if (doc.undoBreakTimer) {
+        [doc.undoBreakTimer invalidate];
+        doc.undoBreakTimer = nil;
+    }
+    [doc.editor setGeneralProperty:SCI_REDO parameter:0 value:0];
+    [self updateStatusText];
+    if (self.previewVisible) [self schedulePreviewUpdate];
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    SEL action = item.action;
+    if (action == @selector(undo:)) {
+        EditorDocument *doc = [self activeDocument];
+        return doc && [doc.editor getGeneralProperty:SCI_CANUNDO parameter:0] != 0;
+    }
+    if (action == @selector(redo:)) {
+        EditorDocument *doc = [self activeDocument];
+        return doc && [doc.editor getGeneralProperty:SCI_CANREDO parameter:0] != 0;
+    }
+    return YES;
+}
+
 #pragma mark Notifications and UI
 
 - (void)handleNotification:(SCNotification *)scn forDocument:(EditorDocument *)doc {
@@ -661,10 +854,47 @@ static const CGFloat kCloseSize = 16.0;
                                                        objCType:@encode(MacroEvent)]];
             break;
         }
+        case SCN_CHARADDED: {
+            doc.lastCharTypedTime = [NSDate timeIntervalSinceReferenceDate];
+            int ch = scn->ch;
+            if (ch == '\n' || ch == '\r') {
+                // Natural line boundary: Enter creates an independent undo group
+                [self breakUndoGroupForDocument:doc];
+            } else if (ch == ' ' || ch == '\t' || ch == ';' || ch == '{' || ch == '}' || ch == '(' || ch == ')') {
+                // Word and statement delimiter boundary
+                [self breakUndoGroupForDocument:doc];
+            } else {
+                // Continuous character typing: group word characters, break on idle pause (>1.2s)
+                [self scheduleUndoBreakForDocument:doc];
+            }
+            break;
+        }
         case SCN_PAINTED:
-        case SCN_UPDATEUI:
+            break;
+        case SCN_UPDATEUI: {
+            long currentPos = [doc.editor getGeneralProperty:SCI_GETCURRENTPOS parameter:0];
+            NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+            BOOL fromTyping = (now - doc.lastCharTypedTime) < 0.05;
+            if (!fromTyping && labs(currentPos - doc.lastCaretPos) > 1) {
+                // Caret jump or mouse click navigation: break undo coalescing
+                [self breakUndoGroupForDocument:doc];
+            }
+            doc.lastCaretPos = currentPos;
+
             if (doc == [self activeDocument]) [self syncSplitScrollingFrom:doc.editor];
             if (doc == [self activeDocument]) [self updateStatusText];
+            break;
+        }
+        case SCN_MODIFIED:
+            if (scn->modificationType & (SC_PERFORMED_UNDO | SC_PERFORMED_REDO)) {
+                if (doc.undoBreakTimer) {
+                    [doc.undoBreakTimer invalidate];
+                    doc.undoBreakTimer = nil;
+                }
+            }
+            if (self.previewVisible && doc == [self activeDocument]) {
+                [self schedulePreviewUpdate];
+            }
             break;
         default:
             break;
@@ -721,39 +951,423 @@ static const CGFloat kCloseSize = 16.0;
     for (NSURL *url in panel.URLs) [self openDocument:url.path];
 }
 
-- (void)findAction:(id)sender {
+#pragma mark - Find and Replace
+
+- (void)buildFindPanel {
+    self.findPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(220, 250, 480, 160)
+                                                styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskUtilityWindow)
+                                                  backing:NSBackingStoreBuffered
+                                                    defer:NO];
+    self.findPanel.title = @"Find & Replace - catatan++";
+    self.findPanel.floatingPanel = YES;
+    NSView *cv = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 480, 160)];
+
+    // Find row
+    NSTextField *lblFind = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 122, 60, 20)];
+    lblFind.stringValue = @"Find:";
+    lblFind.editable = NO; lblFind.bezeled = NO; lblFind.drawsBackground = NO;
+    [cv addSubview:lblFind];
+
+    self.findField = [[NSTextField alloc] initWithFrame:NSMakeRect(80, 120, 210, 24)];
+    self.findField.placeholderString = @"Search text";
+    self.findField.target = self;
+    self.findField.action = @selector(findNextAction:);
+    [cv addSubview:self.findField];
+
+    NSButton *btnNext = [[NSButton alloc] initWithFrame:NSMakeRect(300, 117, 84, 28)];
+    btnNext.title = @"Find Next";
+    btnNext.bezelStyle = NSBezelStyleRounded;
+    btnNext.target = self;
+    btnNext.action = @selector(findNextAction:);
+    [cv addSubview:btnNext];
+
+    NSButton *btnPrev = [[NSButton alloc] initWithFrame:NSMakeRect(388, 117, 84, 28)];
+    btnPrev.title = @"Find Prev";
+    btnPrev.bezelStyle = NSBezelStyleRounded;
+    btnPrev.target = self;
+    btnPrev.action = @selector(findPrevAction:);
+    [cv addSubview:btnPrev];
+
+    // Replace row
+    NSTextField *lblReplace = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 86, 60, 20)];
+    lblReplace.stringValue = @"Replace:";
+    lblReplace.editable = NO; lblReplace.bezeled = NO; lblReplace.drawsBackground = NO;
+    [cv addSubview:lblReplace];
+
+    self.replaceField = [[NSTextField alloc] initWithFrame:NSMakeRect(80, 84, 210, 24)];
+    self.replaceField.placeholderString = @"Replace with";
+    self.replaceField.target = self;
+    self.replaceField.action = @selector(replaceOneAction:);
+    [cv addSubview:self.replaceField];
+
+    NSButton *btnRepl = [[NSButton alloc] initWithFrame:NSMakeRect(300, 81, 84, 28)];
+    btnRepl.title = @"Replace";
+    btnRepl.bezelStyle = NSBezelStyleRounded;
+    btnRepl.target = self;
+    btnRepl.action = @selector(replaceOneAction:);
+    [cv addSubview:btnRepl];
+
+    NSButton *btnReplAll = [[NSButton alloc] initWithFrame:NSMakeRect(388, 81, 84, 28)];
+    btnReplAll.title = @"Replace All";
+    btnReplAll.bezelStyle = NSBezelStyleRounded;
+    btnReplAll.target = self;
+    btnReplAll.action = @selector(replaceAllAction:);
+    [cv addSubview:btnReplAll];
+
+    // Option checkboxes
+    self.caseCheckbox = [NSButton checkboxWithTitle:@"Match case" target:nil action:nil];
+    self.caseCheckbox.frame = NSMakeRect(80, 52, 95, 20);
+    [cv addSubview:self.caseCheckbox];
+
+    self.wordCheckbox = [NSButton checkboxWithTitle:@"Whole word" target:nil action:nil];
+    self.wordCheckbox.frame = NSMakeRect(180, 52, 95, 20);
+    [cv addSubview:self.wordCheckbox];
+
+    self.wrapCheckbox = [NSButton checkboxWithTitle:@"Wrap around" target:nil action:nil];
+    self.wrapCheckbox.frame = NSMakeRect(280, 52, 105, 20);
+    self.wrapCheckbox.state = NSControlStateValueOn;
+    [cv addSubview:self.wrapCheckbox];
+
+    // Status label
+    self.findStatus = [[NSTextField alloc] initWithFrame:NSMakeRect(16, 16, 448, 20)];
+    self.findStatus.stringValue = @"";
+    self.findStatus.editable = NO; self.findStatus.bezeled = NO; self.findStatus.drawsBackground = NO;
+    self.findStatus.font = [NSFont systemFontOfSize:11];
+    self.findStatus.textColor = [NSColor secondaryLabelColor];
+    [cv addSubview:self.findStatus];
+
+    self.findPanel.contentView = cv;
+}
+
+- (void)showFindPanelWithReplace:(BOOL)showReplace {
+    if (!self.findPanel) {
+        [self buildFindPanel];
+    }
     EditorDocument *doc = [self activeDocument];
-    if (!doc) return;
-
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Find";
-    [alert addButtonWithTitle:@"Find Next"];
-    [alert addButtonWithTitle:@"Cancel"];
-
-    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
-    input.placeholderString = @"Search text";
-    alert.accessoryView = input;
-
-    if ([alert runModal] != NSAlertFirstButtonReturn) return;
-    if (input.stringValue.length == 0) return;
-
-    BOOL found = [doc.editor findAndHighlightText:input.stringValue
-                                        matchCase:NO
-                                        wholeWord:NO
-                                         scrollTo:YES
-                                             wrap:YES];
-    if (!found) {
-        [doc.editor setGeneralProperty:SCI_GOTOPOS parameter:0 value:0];
-        found = [doc.editor findAndHighlightText:input.stringValue
-                                       matchCase:NO
-                                       wholeWord:NO
-                                        scrollTo:YES
-                                            wrap:YES];
+    if (doc) {
+        long selStart = [doc.editor getGeneralProperty:SCI_GETSELECTIONSTART parameter:0];
+        long selEnd = [doc.editor getGeneralProperty:SCI_GETSELECTIONEND parameter:0];
+        if (selEnd > selStart && (selEnd - selStart) <= 120) {
+            NSString *all = [doc.editor string];
+            if (selEnd <= (long)all.length) {
+                NSString *selected = [all substringWithRange:NSMakeRange(selStart, selEnd - selStart)];
+                if (selected.length > 0 && ![selected containsString:@"\n"]) {
+                    self.findField.stringValue = selected;
+                }
+            }
+        }
     }
-    if (!found) {
+    self.findStatus.stringValue = @"";
+    [self.findPanel makeKeyAndOrderFront:nil];
+    if (showReplace) {
+        [self.findPanel makeFirstResponder:self.replaceField];
+    } else {
+        [self.findPanel makeFirstResponder:self.findField];
+    }
+}
+
+- (void)findAction:(id)sender {
+    [self showFindPanelWithReplace:NO];
+}
+
+- (void)replaceAction:(id)sender {
+    [self showFindPanelWithReplace:YES];
+}
+
+- (void)findNextAction:(id)sender {
+    NSString *query = self.findField.stringValue;
+    if (query.length == 0) return;
+    BOOL mc = (self.caseCheckbox.state == NSControlStateValueOn);
+    BOOL ww = (self.wordCheckbox.state == NSControlStateValueOn);
+    BOOL wrap = (self.wrapCheckbox.state == NSControlStateValueOn);
+    BOOL found = [self performFind:query matchCase:mc wholeWord:ww wrap:wrap backwards:NO];
+    if (found) {
+        EditorDocument *doc = [self activeDocument];
+        long pos = [doc.editor getGeneralProperty:SCI_GETCURRENTPOS parameter:0];
+        long line = [doc.editor getGeneralProperty:SCI_LINEFROMPOSITION parameter:pos] + 1;
+        self.findStatus.stringValue = [NSString stringWithFormat:@"Found on line %ld", line];
+    } else {
         NSBeep();
-        self.status.stringValue = [NSString stringWithFormat:@"Not found: %@", input.stringValue];
+        self.findStatus.stringValue = [NSString stringWithFormat:@"\"%@\" not found", query];
     }
+}
+
+- (void)findPrevAction:(id)sender {
+    NSString *query = self.findField.stringValue;
+    if (query.length == 0) return;
+    BOOL mc = (self.caseCheckbox.state == NSControlStateValueOn);
+    BOOL ww = (self.wordCheckbox.state == NSControlStateValueOn);
+    BOOL wrap = (self.wrapCheckbox.state == NSControlStateValueOn);
+    BOOL found = [self performFind:query matchCase:mc wholeWord:ww wrap:wrap backwards:YES];
+    if (found) {
+        EditorDocument *doc = [self activeDocument];
+        long pos = [doc.editor getGeneralProperty:SCI_GETCURRENTPOS parameter:0];
+        long line = [doc.editor getGeneralProperty:SCI_LINEFROMPOSITION parameter:pos] + 1;
+        self.findStatus.stringValue = [NSString stringWithFormat:@"Found on line %ld", line];
+    } else {
+        NSBeep();
+        self.findStatus.stringValue = [NSString stringWithFormat:@"\"%@\" not found", query];
+    }
+}
+
+- (void)replaceOneAction:(id)sender {
+    NSString *query = self.findField.stringValue;
+    NSString *repl = self.replaceField.stringValue ?: @"";
+    if (query.length == 0) return;
+    BOOL mc = (self.caseCheckbox.state == NSControlStateValueOn);
+    BOOL ww = (self.wordCheckbox.state == NSControlStateValueOn);
+    int count = [self performReplace:query with:repl matchCase:mc wholeWord:ww all:NO];
+    if (count > 0) {
+        self.findStatus.stringValue = @"Replaced 1 occurrence";
+        BOOL wrap = (self.wrapCheckbox.state == NSControlStateValueOn);
+        [self performFind:query matchCase:mc wholeWord:ww wrap:wrap backwards:NO];
+    } else {
+        self.findStatus.stringValue = @"No match to replace";
+    }
+}
+
+- (void)replaceAllAction:(id)sender {
+    NSString *query = self.findField.stringValue;
+    NSString *repl = self.replaceField.stringValue ?: @"";
+    if (query.length == 0) return;
+    BOOL mc = (self.caseCheckbox.state == NSControlStateValueOn);
+    BOOL ww = (self.wordCheckbox.state == NSControlStateValueOn);
+    int count = [self performReplace:query with:repl matchCase:mc wholeWord:ww all:YES];
+    self.findStatus.stringValue = [NSString stringWithFormat:@"Replaced %d occurrence%@", count, count == 1 ? @"" : @"s"];
+}
+
+- (BOOL)performFind:(NSString *)query
+          matchCase:(BOOL)mc
+          wholeWord:(BOOL)ww
+               wrap:(BOOL)wrap
+          backwards:(BOOL)backwards {
+    EditorDocument *doc = [self activeDocument];
+    if (!doc || query.length == 0) return NO;
+    return [doc.editor findAndHighlightText:query
+                                  matchCase:mc
+                                  wholeWord:ww
+                                   scrollTo:YES
+                                       wrap:wrap
+                                  backwards:backwards];
+}
+
+- (int)performReplace:(NSString *)query
+                 with:(NSString *)replacement
+            matchCase:(BOOL)mc
+            wholeWord:(BOOL)ww
+                  all:(BOOL)all {
+    EditorDocument *doc = [self activeDocument];
+    if (!doc || query.length == 0) return 0;
+    int count = [doc.editor findAndReplaceText:query
+                                       byText:replacement ?: @""
+                                    matchCase:mc
+                                    wholeWord:ww
+                                        doAll:all];
+    if (count > 0) {
+        doc.dirty = YES;
+        [self updateUI];
+    }
+    return count;
+}
+
+#pragma mark - Preferences
+
+- (void)applyPreferences {
+    NSString *font = [self currentFontName];
+    NSInteger size = [self currentFontSize];
+    NSInteger tab = [self currentTabWidth];
+    BOOL spaces = [self currentUseSpaces];
+    BOOL wrap = [self currentWordWrap];
+    BOOL lines = [self currentShowLineNumbers];
+
+    for (EditorDocument *doc in self.documents) {
+        ScintillaView *sci = doc.editor;
+        [sci setGeneralProperty:SCI_STYLESETFONT parameter:STYLE_DEFAULT value:(sptr_t)[font UTF8String]];
+        [sci setGeneralProperty:SCI_STYLESETSIZE parameter:STYLE_DEFAULT value:size];
+        [sci setGeneralProperty:SCI_STYLECLEARALL parameter:0 value:0];
+        [sci setGeneralProperty:SCI_SETTABWIDTH parameter:tab value:0];
+        [sci setGeneralProperty:SCI_SETUSETABS parameter:spaces ? 0 : 1 value:0];
+        [sci message:SCI_SETWRAPMODE wParam:wrap ? SC_WRAP_WORD : SC_WRAP_NONE];
+        [sci setGeneralProperty:SCI_SETMARGINWIDTHN parameter:0 value:lines ? 52 : 0];
+        if (doc.lang) {
+            [self applyLanguage:doc.lang toDocument:doc];
+        }
+    }
+    [self updateUI];
+}
+
+- (void)setTestPreferenceFont:(NSString *)font
+                         size:(NSInteger)sz
+                     tabWidth:(NSInteger)tab
+                    useSpaces:(BOOL)spaces
+                     wordWrap:(BOOL)wrap
+                  lineNumbers:(BOOL)lines {
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    if (font) [u setObject:font forKey:@"pref_font"];
+    if (sz > 0) [u setInteger:sz forKey:@"pref_fontsize"];
+    if (tab > 0) [u setInteger:tab forKey:@"pref_tabwidth"];
+    [u setBool:spaces forKey:@"pref_usespaces"];
+    [u setBool:wrap forKey:@"pref_wordwrap"];
+    [u setBool:lines forKey:@"pref_linenumbers"];
+    [u synchronize];
+    [self applyPreferences];
+}
+
+- (void)buildPrefsWindow {
+    self.prefsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(200, 200, 380, 260)
+                                                   styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:NO];
+    self.prefsWindow.title = @"Preferences - catatan++";
+    NSView *cv = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 260)];
+
+    // Font selection
+    NSTextField *lblFont = [[NSTextField alloc] initWithFrame:NSMakeRect(24, 218, 90, 20)];
+    lblFont.stringValue = @"Font Family:";
+    lblFont.editable = NO; lblFont.bezeled = NO; lblFont.drawsBackground = NO;
+    [cv addSubview:lblFont];
+
+    self.prefFontPop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(120, 215, 230, 26) pullsDown:NO];
+    [self.prefFontPop addItemsWithTitles:@[@"Menlo", @"Monaco", @"Courier", @"Courier New"]];
+    [self.prefFontPop selectItemWithTitle:[self currentFontName]];
+    [cv addSubview:self.prefFontPop];
+
+    // Font size
+    NSTextField *lblSize = [[NSTextField alloc] initWithFrame:NSMakeRect(24, 180, 90, 20)];
+    lblSize.stringValue = @"Font Size:";
+    lblSize.editable = NO; lblSize.bezeled = NO; lblSize.drawsBackground = NO;
+    [cv addSubview:lblSize];
+
+    self.prefSizePop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(120, 177, 100, 26) pullsDown:NO];
+    for (NSString *s in @[@"9", @"10", @"11", @"12", @"13", @"14", @"16", @"18", @"20", @"24"]) {
+        [self.prefSizePop addItemWithTitle:s];
+    }
+    [self.prefSizePop selectItemWithTitle:[NSString stringWithFormat:@"%ld", (long)[self currentFontSize]]];
+    [cv addSubview:self.prefSizePop];
+
+    // Tab Width
+    NSTextField *lblTab = [[NSTextField alloc] initWithFrame:NSMakeRect(24, 142, 90, 20)];
+    lblTab.stringValue = @"Tab Width:";
+    lblTab.editable = NO; lblTab.bezeled = NO; lblTab.drawsBackground = NO;
+    [cv addSubview:lblTab];
+
+    self.prefTabPop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(120, 139, 100, 26) pullsDown:NO];
+    [self.prefTabPop addItemsWithTitles:@[@"2", @"4", @"8"]];
+    [self.prefTabPop selectItemWithTitle:[NSString stringWithFormat:@"%ld", (long)[self currentTabWidth]]];
+    [cv addSubview:self.prefTabPop];
+
+    // Checkboxes
+    self.prefSpacesCheck = [NSButton checkboxWithTitle:@"Use spaces instead of tabs (soft tabs)"
+                                                target:nil action:nil];
+    self.prefSpacesCheck.frame = NSMakeRect(24, 106, 300, 22);
+    self.prefSpacesCheck.state = [self currentUseSpaces] ? NSControlStateValueOn : NSControlStateValueOff;
+    [cv addSubview:self.prefSpacesCheck];
+
+    self.prefLineNumCheck = [NSButton checkboxWithTitle:@"Display line numbers margin"
+                                                 target:nil action:nil];
+    self.prefLineNumCheck.frame = NSMakeRect(24, 80, 300, 22);
+    self.prefLineNumCheck.state = [self currentShowLineNumbers] ? NSControlStateValueOn : NSControlStateValueOff;
+    [cv addSubview:self.prefLineNumCheck];
+
+    self.prefWrapCheck = [NSButton checkboxWithTitle:@"Enable word wrap by default"
+                                              target:nil action:nil];
+    self.prefWrapCheck.frame = NSMakeRect(24, 54, 300, 22);
+    self.prefWrapCheck.state = [self currentWordWrap] ? NSControlStateValueOn : NSControlStateValueOff;
+    [cv addSubview:self.prefWrapCheck];
+
+    // Apply Button
+    NSButton *applyBtn = [[NSButton alloc] initWithFrame:NSMakeRect(250, 16, 105, 30)];
+    applyBtn.title = @"Save & Apply";
+    applyBtn.bezelStyle = NSBezelStyleRounded;
+    applyBtn.target = self;
+    applyBtn.action = @selector(savePreferencesFromUI:);
+    [cv addSubview:applyBtn];
+
+    self.prefsWindow.contentView = cv;
+}
+
+- (void)showPreferences:(id)sender {
+    if (!self.prefsWindow) {
+        [self buildPrefsWindow];
+    }
+    [self.prefsWindow makeKeyAndOrderFront:nil];
+}
+
+- (void)savePreferencesFromUI:(id)sender {
+    NSString *font = self.prefFontPop.selectedItem.title ?: @"Menlo";
+    NSInteger sz = [self.prefSizePop.selectedItem.title integerValue] ?: 13;
+    NSInteger tab = [self.prefTabPop.selectedItem.title integerValue] ?: 4;
+    BOOL spaces = (self.prefSpacesCheck.state == NSControlStateValueOn);
+    BOOL lines = (self.prefLineNumCheck.state == NSControlStateValueOn);
+    BOOL wrap = (self.prefWrapCheck.state == NSControlStateValueOn);
+
+    [self setTestPreferenceFont:font size:sz tabWidth:tab useSpaces:spaces wordWrap:wrap lineNumbers:lines];
+    if (self.prefsWindow) {
+        [self.prefsWindow close];
+    }
+}
+
+#pragma mark - Session Restoration
+
+- (NSString *)sessionFilePath {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
+    NSString *base = paths.firstObject ?: NSTemporaryDirectory();
+    NSString *appDir = [base stringByAppendingPathComponent:@"Catatan++"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:appDir withIntermediateDirectories:YES attributes:nil error:NULL];
+    return [appDir stringByAppendingPathComponent:@"session.plist"];
+}
+
+- (void)saveSession {
+    NSMutableArray *docs = [NSMutableArray array];
+    for (EditorDocument *doc in self.documents) {
+        if (doc.path.length > 0) {
+            long pos = [doc.editor getGeneralProperty:SCI_GETCURRENTPOS parameter:0];
+            [docs addObject:@{
+                @"path": doc.path,
+                @"lang": doc.lang ?: @"normal",
+                @"cursor": @(pos),
+                @"dirty": @(doc.dirty)
+            }];
+        }
+    }
+    NSDictionary *dict = @{
+        @"documents": docs,
+        @"activeIndex": @(self.activeIndex)
+    };
+    [dict writeToFile:[self sessionFilePath] atomically:YES];
+}
+
+- (BOOL)restoreSession {
+    NSString *path = [self sessionFilePath];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return NO;
+    NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
+    if (!dict) return NO;
+    NSArray *docs = dict[@"documents"];
+    if (!docs || docs.count == 0) return NO;
+
+    NSInteger savedActive = [dict[@"activeIndex"] integerValue];
+    NSInteger restoredCount = 0;
+    for (NSDictionary *info in docs) {
+        NSString *filePath = info[@"path"];
+        if (filePath && [[NSFileManager defaultManager] fileExistsAtPath:filePath]) {
+            [self openDocument:filePath];
+            EditorDocument *doc = [self.documents lastObject];
+            long pos = [info[@"cursor"] longValue];
+            if (pos > 0) {
+                [doc.editor setGeneralProperty:SCI_GOTOPOS parameter:pos value:0];
+            }
+            restoredCount++;
+        }
+    }
+    if (restoredCount > 0) {
+        if (savedActive >= 0 && savedActive < (NSInteger)self.documents.count) {
+            [self showDocumentAtIndex:savedActive];
+        } else {
+            [self showDocumentAtIndex:self.documents.count - 1];
+        }
+        return YES;
+    }
+    return NO;
 }
 
 - (void)selectLanguage:(id)item {
@@ -768,6 +1382,153 @@ static const CGFloat kCloseSize = 16.0;
 
 - (void)tabStrip:(TabStripView *)strip didCloseIndex:(NSInteger)index {
     [self closeDocumentAtIndex:index];
+}
+
+- (void)closeOtherTabsAction:(id)sender {
+    (void)sender;
+    NSInteger active = self.activeIndex;
+    if (active < 0 || active >= (NSInteger)self.documents.count) return;
+    EditorDocument *keepDoc = self.documents[active];
+
+    for (NSInteger i = (NSInteger)self.documents.count - 1; i >= 0; i--) {
+        if (self.documents[i] != keepDoc) {
+            [self closeDocumentAtIndex:i];
+        }
+    }
+}
+
+- (void)closeTabsToRightAction:(id)sender {
+    (void)sender;
+    NSInteger active = self.activeIndex;
+    if (active < 0 || active >= (NSInteger)self.documents.count) return;
+
+    for (NSInteger i = (NSInteger)self.documents.count - 1; i > active; i--) {
+        [self closeDocumentAtIndex:i];
+    }
+}
+
+- (NSMenu *)tabStrip:(TabStripView *)strip menuForTabIndex:(NSInteger)index {
+    (void)strip;
+    (void)index;
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Tab Context Menu"];
+    menu.delegate = self;
+
+    NSMenuItem *previewItem = [[NSMenuItem alloc] initWithTitle:@"Live Preview (Markdown / Mermaid / PlantUML)" action:@selector(toggleLivePreviewAction:) keyEquivalent:@""];
+    previewItem.target = self;
+    previewItem.identifier = @"tab_ctx_preview";
+    [menu addItem:previewItem];
+
+    NSMenuItem *previewSplit = [[NSMenuItem alloc] initWithTitle:@"Preview Layout: Side by Side" action:@selector(setPreviewLayoutSideBySideAction:) keyEquivalent:@""];
+    previewSplit.target = self;
+    previewSplit.identifier = @"tab_ctx_preview_split";
+    [menu addItem:previewSplit];
+
+    NSMenuItem *previewFull = [[NSMenuItem alloc] initWithTitle:@"Preview Layout: Full Window" action:@selector(setPreviewLayoutFullAction:) keyEquivalent:@""];
+    previewFull.target = self;
+    previewFull.identifier = @"tab_ctx_preview_full";
+    [menu addItem:previewFull];
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *closeItem = [[NSMenuItem alloc] initWithTitle:@"Close" action:@selector(closeCurrentTab) keyEquivalent:@""];
+    closeItem.target = self;
+    [menu addItem:closeItem];
+
+    NSMenuItem *closeOthers = [[NSMenuItem alloc] initWithTitle:@"Close Multiple Tabs" action:nil keyEquivalent:@""];
+    NSMenu *multiMenu = [[NSMenu alloc] initWithTitle:@"Close Multiple Tabs"];
+
+    NSMenuItem *closeOtherTabs = [[NSMenuItem alloc] initWithTitle:@"Close Other Tabs" action:@selector(closeOtherTabsAction:) keyEquivalent:@""];
+    closeOtherTabs.target = self;
+    [multiMenu addItem:closeOtherTabs];
+
+    NSMenuItem *closeRight = [[NSMenuItem alloc] initWithTitle:@"Close Tabs to the Right" action:@selector(closeTabsToRightAction:) keyEquivalent:@""];
+    closeRight.target = self;
+    [multiMenu addItem:closeRight];
+
+    closeOthers.submenu = multiMenu;
+    [menu addItem:closeOthers];
+
+    NSMenuItem *closeAll = [[NSMenuItem alloc] initWithTitle:@"Close All" action:@selector(closeAllDocuments) keyEquivalent:@""];
+    closeAll.target = self;
+    [menu addItem:closeAll];
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *save = [[NSMenuItem alloc] initWithTitle:@"Save" action:@selector(saveCurrent) keyEquivalent:@""];
+    save.target = self;
+    [menu addItem:save];
+
+    return menu;
+}
+
+- (NSMenu *)editorContextMenu {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Editor Context Menu"];
+    menu.delegate = self;
+
+    NSMenuItem *undo = [[NSMenuItem alloc] initWithTitle:@"Undo" action:@selector(undo:) keyEquivalent:@""];
+    [menu addItem:undo];
+    NSMenuItem *redo = [[NSMenuItem alloc] initWithTitle:@"Redo" action:@selector(redo:) keyEquivalent:@""];
+    [menu addItem:redo];
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *cut = [[NSMenuItem alloc] initWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@""];
+    [menu addItem:cut];
+    NSMenuItem *copy = [[NSMenuItem alloc] initWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@""];
+    [menu addItem:copy];
+    NSMenuItem *paste = [[NSMenuItem alloc] initWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@""];
+    [menu addItem:paste];
+    NSMenuItem *selAll = [[NSMenuItem alloc] initWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@""];
+    [menu addItem:selAll];
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *previewItem = [[NSMenuItem alloc] initWithTitle:@"Live Preview (Markdown / Mermaid / PlantUML)" action:@selector(toggleLivePreviewAction:) keyEquivalent:@""];
+    previewItem.target = self;
+    previewItem.identifier = @"ctx_preview";
+    [menu addItem:previewItem];
+
+    NSMenuItem *previewSplit = [[NSMenuItem alloc] initWithTitle:@"Preview Layout: Side by Side" action:@selector(setPreviewLayoutSideBySideAction:) keyEquivalent:@""];
+    previewSplit.target = self;
+    previewSplit.identifier = @"ctx_preview_split";
+    [menu addItem:previewSplit];
+
+    NSMenuItem *previewFull = [[NSMenuItem alloc] initWithTitle:@"Preview Layout: Full Window" action:@selector(setPreviewLayoutFullAction:) keyEquivalent:@""];
+    previewFull.target = self;
+    previewFull.identifier = @"ctx_preview_full";
+    [menu addItem:previewFull];
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *wrap = [[NSMenuItem alloc] initWithTitle:@"Word Wrap" action:@selector(toggleWordWrap) keyEquivalent:@""];
+    wrap.target = self;
+    wrap.identifier = @"ctx_wrap";
+    [menu addItem:wrap];
+
+    NSMenuItem *allChars = [[NSMenuItem alloc] initWithTitle:@"Show All Characters" action:@selector(toggleAllCharacters) keyEquivalent:@""];
+    allChars.target = self;
+    allChars.identifier = @"ctx_all_chars";
+    [menu addItem:allChars];
+
+    return menu;
+}
+
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    EditorDocument *doc = [self activeDocument];
+    ScintillaView *sci = doc ? doc.editor : nil;
+
+    for (NSMenuItem *item in menu.itemArray) {
+        if ([item.identifier isEqualToString:@"ctx_preview"] || [item.identifier isEqualToString:@"tab_ctx_preview"]) {
+            item.state = self.previewVisible ? NSControlStateValueOn : NSControlStateValueOff;
+        } else if ([item.identifier isEqualToString:@"ctx_preview_split"] || [item.identifier isEqualToString:@"tab_ctx_preview_split"]) {
+            item.state = (self.previewVisible && self.previewLayoutMode == PreviewLayoutSideBySide) ? NSControlStateValueOn : NSControlStateValueOff;
+            item.enabled = self.previewVisible;
+        } else if ([item.identifier isEqualToString:@"ctx_preview_full"] || [item.identifier isEqualToString:@"tab_ctx_preview_full"]) {
+            item.state = (self.previewVisible && self.previewLayoutMode == PreviewLayoutFullPreview) ? NSControlStateValueOn : NSControlStateValueOff;
+            item.enabled = self.previewVisible;
+        } else if ([item.identifier isEqualToString:@"ctx_wrap"]) {
+            BOOL isWrapped = sci && [sci getGeneralProperty:SCI_GETWRAPMODE parameter:0] != SC_WRAP_NONE;
+            item.state = isWrapped ? NSControlStateValueOn : NSControlStateValueOff;
+        } else if ([item.identifier isEqualToString:@"ctx_all_chars"]) {
+            BOOL isAllChars = sci && [sci getGeneralProperty:SCI_GETVIEWWS parameter:0] != SCWS_INVISIBLE;
+            item.state = isAllChars ? NSControlStateValueOn : NSControlStateValueOff;
+        }
+    }
 }
 
 #pragma mark - Toolbar
@@ -798,10 +1559,10 @@ static const CGFloat kCloseSize = 16.0;
     else if ([cmd isEqualToString:@"edit_cut"]) { [sci setGeneralProperty:SCI_CUT parameter:0 value:0]; }
     else if ([cmd isEqualToString:@"edit_copy"]) { [sci setGeneralProperty:SCI_COPY parameter:0 value:0]; }
     else if ([cmd isEqualToString:@"edit_paste"]) { [sci setGeneralProperty:SCI_PASTE parameter:0 value:0]; }
-    else if ([cmd isEqualToString:@"edit_undo"]) { [sci setGeneralProperty:SCI_UNDO parameter:0 value:0]; }
-    else if ([cmd isEqualToString:@"edit_redo"]) { [sci setGeneralProperty:SCI_REDO parameter:0 value:0]; }
-    else if ([cmd isEqualToString:@"search_find"]) { [self findAction:nil]; }
-    else if ([cmd isEqualToString:@"search_replace"]) { [self findAction:nil]; }
+    else if ([cmd isEqualToString:@"edit_undo"]) { [self performUndo]; }
+    else if ([cmd isEqualToString:@"edit_redo"]) { [self performRedo]; }
+    else if ([cmd isEqualToString:@"search_find"]) { [self showFindPanelWithReplace:NO]; }
+    else if ([cmd isEqualToString:@"search_replace"]) { [self showFindPanelWithReplace:YES]; }
     else if ([cmd isEqualToString:@"view_zoom_in"]) { [sci setGeneralProperty:SCI_ZOOMIN parameter:0 value:0]; [self updateUI]; }
     else if ([cmd isEqualToString:@"view_zoom_out"]) { [sci setGeneralProperty:SCI_ZOOMOUT parameter:0 value:0]; [self updateUI]; }
     else if ([cmd isEqualToString:@"view_sync_v"]) { [self toggleSyncScrolling:YES]; }
@@ -827,16 +1588,16 @@ static const CGFloat kCloseSize = 16.0;
 
 - (BOOL)toolbar:(ToolbarView *)toolbar isItemToggledAtIndex:(NSInteger)index {
     NSString *cmd = [toolbar commandAtIndex:index];
+    if (!cmd) return NO;
     EditorDocument *doc = [self activeDocument];
-    if (!cmd || !doc) return NO;
-    ScintillaView *sci = doc.editor;
+    ScintillaView *sci = doc ? doc.editor : nil;
 
     if ([cmd isEqualToString:@"view_wrap"])
-        return [sci getGeneralProperty:SCI_GETWRAPMODE parameter:0] != SC_WRAP_NONE;
+        return sci ? [sci getGeneralProperty:SCI_GETWRAPMODE parameter:0] != SC_WRAP_NONE : NO;
     if ([cmd isEqualToString:@"view_all_chars"])
-        return [sci getGeneralProperty:SCI_GETVIEWWS parameter:0] != SCWS_INVISIBLE;
+        return sci ? [sci getGeneralProperty:SCI_GETVIEWWS parameter:0] != SCWS_INVISIBLE : NO;
     if ([cmd isEqualToString:@"view_indent_guide"])
-        return [sci getGeneralProperty:SCI_GETINDENTATIONGUIDES parameter:0] != SC_IV_NONE;
+        return sci ? [sci getGeneralProperty:SCI_GETINDENTATIONGUIDES parameter:0] != SC_IV_NONE : NO;
     if ([cmd isEqualToString:@"view_monitoring"])
         return self.tailingActive;
     if ([cmd isEqualToString:@"view_sync_v"]) return self.syncVertical;
@@ -906,23 +1667,65 @@ static const CGFloat kCloseSize = 16.0;
     [self reloadPanelNamed:name];
 }
 
-// Editor and sidebar share the body area; the sidebar is pinned left.
+// Editor, sidebar, and live preview share the body area.
 - (void)relayoutBody {
+    CGFloat totalW = NSWidth(self.contentView.bounds);
+    CGFloat totalH = NSHeight(self.contentView.bounds);
+    if (totalW <= 0 || totalH <= 0) return;
+
+    const CGFloat kToolbarH = 34.0;
+    const CGFloat kTabH = 30.0;
+    self.bodyTop = totalH - kToolbarH - kTabH;
     CGFloat bodyHeight = self.bodyTop - self.bodyBottom;
+    if (bodyHeight < 50) bodyHeight = 50;
+
+    // Pin header and footer bars dynamically
+    self.toolbar.frame = NSMakeRect(0, totalH - kToolbarH, totalW, kToolbarH);
+    self.tabStrip.frame = NSMakeRect(0, totalH - kToolbarH - kTabH, totalW, kTabH);
+    self.status.frame = NSMakeRect(0, 0, totalW, self.bodyBottom);
+
     BOOL shown = self.sidebar.superview != nil;
-    CGFloat w = self.sidebarWidth;
+    CGFloat sbW = shown ? self.sidebarWidth : 0;
+    CGFloat availW = totalW - sbW;
+    if (availW < 100) availW = 100;
 
     if (shown) {
-        self.sidebar.frame = NSMakeRect(0, self.bodyBottom, w, bodyHeight);
-        self.editorContainer.frame = NSMakeRect(w, self.bodyBottom,
-                                                NSWidth(self.contentView.bounds) - w,
-                                                bodyHeight);
+        self.sidebar.frame = NSMakeRect(0, self.bodyBottom, sbW, bodyHeight);
+    }
+
+    BOOL previewActive = self.previewVisible && self.previewWebView && self.previewWebView.superview;
+    if (previewActive) {
+        if (self.previewLayoutMode == PreviewLayoutFullPreview) {
+            // Full Preview Mode (VS Code style single full window)
+            self.editorContainer.hidden = YES;
+            self.previewWebView.hidden = NO;
+            self.previewWebView.frame = NSMakeRect(sbW, self.bodyBottom, availW, bodyHeight);
+        } else {
+            // Side-by-Side Mode (50/50 split)
+            self.editorContainer.hidden = NO;
+            self.previewWebView.hidden = NO;
+            CGFloat halfW = floor(availW / 2.0);
+            self.editorContainer.frame = NSMakeRect(sbW, self.bodyBottom, halfW, bodyHeight);
+            self.previewWebView.frame = NSMakeRect(sbW + halfW, self.bodyBottom, availW - halfW, bodyHeight);
+        }
     } else {
-        self.editorContainer.frame = NSMakeRect(0, self.bodyBottom,
-                                                NSWidth(self.contentView.bounds), bodyHeight);
+        // Full Editor Mode
+        self.editorContainer.hidden = NO;
+        self.editorContainer.frame = NSMakeRect(sbW, self.bodyBottom, availW, bodyHeight);
+        if (self.previewWebView) {
+            self.previewWebView.hidden = YES;
+        }
     }
 
     [self showDocumentAtIndex:self.activeIndex];
+}
+
+- (void)windowDidResize:(NSNotification *)notification {
+    [self relayoutBody];
+}
+
+- (void)onContentViewFrameChanged:(NSNotification *)notification {
+    [self relayoutBody];
 }
 
 - (void)reloadPanelNamed:(NSString *)name {
@@ -1013,11 +1816,21 @@ static const CGFloat kCloseSize = 16.0;
     NSMutableArray<SidebarItem *> *out = [NSMutableArray array];
     if (text.length == 0) return out;
 
+    NSString *lowLang = [lang lowercaseString] ?: @"";
     BOOL cLike = [@[@"cpp", @"c", @"cs", @"java", @"javascript.js", @"typescript",
-                    @"objc", @"rust", @"go", @"swift", @"php"] containsObject:lang ?: @""];
-    BOOL pyLike = [lang isEqualToString:@"python"];
-    BOOL luaLike = [lang isEqualToString:@"lua"];
-    if (!cLike && !pyLike && !luaLike) return out;
+                    @"objc", @"rust", @"go", @"swift", @"php"] containsObject:lowLang];
+    BOOL pyLike = [lowLang isEqualToString:@"python"];
+    BOOL luaLike = [lowLang isEqualToString:@"lua"];
+    BOOL bashLike = [@[@"bash", @"sh", @"zsh"] containsObject:lowLang];
+    BOOL sqlLike = [@[@"sql", @"mssql"] containsObject:lowLang];
+    BOOL rubyLike = [lowLang isEqualToString:@"ruby"];
+    BOOL perlLike = [lowLang isEqualToString:@"perl"];
+    BOOL rLike = [lowLang isEqualToString:@"r"];
+    BOOL mdLike = [@[@"markdown", @"md"] containsObject:lowLang];
+    BOOL yamlLike = [@[@"yaml", @"yml"] containsObject:lowLang];
+
+    if (!cLike && !pyLike && !luaLike && !bashLike && !sqlLike &&
+        !rubyLike && !perlLike && !rLike && !mdLike && !yamlLike) return out;
 
     NSArray<NSString *> *lines = [text componentsSeparatedByString:@"\n"];
     NSRegularExpression *cRe = [NSRegularExpression
@@ -1030,24 +1843,62 @@ static const CGFloat kCloseSize = 16.0;
     NSRegularExpression *luaRe = [NSRegularExpression
         regularExpressionWithPattern:@"^[\\t ]*(?:local\\s+)?function\\s+([A-Za-z_][\\w\\.:]*)"
                              options:0 error:NULL];
+    NSRegularExpression *bashRe = [NSRegularExpression
+        regularExpressionWithPattern:@"^[\\t ]*(?:function\\s+)?([A-Za-z_][\\w-]*)\\s*(?:\\(\\s*\\))?\\s*\\{"
+                             options:0 error:NULL];
+    NSRegularExpression *sqlRe = [NSRegularExpression
+        regularExpressionWithPattern:@"^[\\t ]*(?:CREATE(?:\\s+OR\\s+REPLACE)?\\s+)?(?:FUNCTION|PROCEDURE|TRIGGER|VIEW|TABLE)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?([A-Za-z_0-9\\.]+)"
+                             options:NSRegularExpressionCaseInsensitive error:NULL];
+    NSRegularExpression *rubyRe = [NSRegularExpression
+        regularExpressionWithPattern:@"^[\\t ]*(?:def|class|module)\\s+([A-Za-z_][\\w\\.\\?\\!=:]*)"
+                             options:0 error:NULL];
+    NSRegularExpression *perlRe = [NSRegularExpression
+        regularExpressionWithPattern:@"^[\\t ]*sub\\s+([A-Za-z_]\\w*)"
+                             options:0 error:NULL];
+    NSRegularExpression *rRe = [NSRegularExpression
+        regularExpressionWithPattern:@"^[\\t ]*([A-Za-z_\\.][\\w\\.]*)\\s*(?:<-|=)\\s*function\\s*\\("
+                             options:0 error:NULL];
+    NSRegularExpression *mdRe = [NSRegularExpression
+        regularExpressionWithPattern:@"^(#{1,6})\\s+(.+)$"
+                             options:0 error:NULL];
+    NSRegularExpression *yamlRe = [NSRegularExpression
+        regularExpressionWithPattern:@"^([A-Za-z0-9_-]+)\\s*:"
+                             options:0 error:NULL];
 
-    NSCharacterSet *keywords = [NSCharacterSet characterSetWithCharactersInString:@""];
-    (void)keywords;
     NSSet *control = [NSSet setWithArray:@[@"if", @"for", @"while", @"switch", @"catch",
                                           @"return", @"sizeof", @"else", @"do"]];
 
     for (NSUInteger i = 0; i < lines.count; i++) {
         NSString *line = lines[i];
-        NSRegularExpression *re = pyLike ? pyRe : (luaLike ? luaRe : cRe);
+        NSRegularExpression *re = cLike ? cRe :
+                                  (pyLike ? pyRe :
+                                  (luaLike ? luaRe :
+                                  (bashLike ? bashRe :
+                                  (sqlLike ? sqlRe :
+                                  (rubyLike ? rubyRe :
+                                  (perlLike ? perlRe :
+                                  (rLike ? rRe :
+                                  (mdLike ? mdRe : yamlRe))))))));
+
         NSTextCheckingResult *m = [re firstMatchInString:line
                                                  options:0
                                                    range:NSMakeRange(0, line.length)];
         if (!m || m.numberOfRanges < 2) continue;
-        NSString *name = [line substringWithRange:[m rangeAtIndex:1]];
+
+        NSString *name = nil;
+        NSString *detail = [NSString stringWithFormat:@"L%lu", (unsigned long)i + 1];
+
+        if (mdLike && m.numberOfRanges >= 3) {
+            NSString *hashes = [line substringWithRange:[m rangeAtIndex:1]];
+            name = [line substringWithRange:[m rangeAtIndex:2]];
+            detail = [NSString stringWithFormat:@"H%lu L%lu", (unsigned long)hashes.length, (unsigned long)i + 1];
+        } else {
+            name = [line substringWithRange:[m rangeAtIndex:1]];
+        }
+
         if ([control containsObject:name]) continue;
         [out addObject:[SidebarItem itemWithTitle:name
-                                           detail:[NSString stringWithFormat:@"L%lu",
-                                                   (unsigned long)i + 1]
+                                           detail:detail
                                              line:(NSInteger)i + 1]];
         if (out.count >= 500) break;
     }
@@ -1420,6 +2271,251 @@ static const CGFloat kCloseSize = 16.0;
     self.status.stringValue = text;
 }
 
+#pragma mark - Live Preview (Markdown, Mermaid, PlantUML)
+
+- (void)ensurePreviewWebView {
+    if (self.previewWebView) return;
+
+    WKWebViewConfiguration *config = [WKWebViewConfiguration new];
+    [config.preferences setValue:@YES forKey:@"allowFileAccessFromFileURLs"];
+
+    WKUserContentController *userContent = [[WKUserContentController alloc] init];
+    [userContent addScriptMessageHandler:self name:@"catatan"];
+    config.userContentController = userContent;
+
+    self.previewWebView = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:config];
+    self.previewWebView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+    NSURL *previewURL = [[NSBundle mainBundle] URLForResource:@"preview" withExtension:@"html" subdirectory:@"preview"];
+    if (!previewURL) {
+        NSString *localPath = @"/Users/nb-mac-fj2n0x/Work/wproject/notepad++/macport/resources/preview/preview.html";
+        if ([[NSFileManager defaultManager] fileExistsAtPath:localPath]) {
+            previewURL = [NSURL fileURLWithPath:localPath];
+        }
+    }
+
+    if (previewURL) {
+        NSURL *previewDir = [previewURL URLByDeletingLastPathComponent];
+        [self.previewWebView loadFileURL:previewURL allowingReadAccessToURL:previewDir];
+    }
+}
+
+- (void)toggleLivePreviewAction:(id)sender {
+    (void)sender;
+    self.previewVisible = !self.previewVisible;
+    if (self.previewVisible) {
+        [self ensurePreviewWebView];
+        if (!self.previewWebView.superview) {
+            [self.contentView addSubview:self.previewWebView];
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self updateLivePreview];
+        });
+    } else {
+        if (self.previewWebView.superview) {
+            [self.previewWebView removeFromSuperview];
+        }
+    }
+    [self relayoutBody];
+    [self flashStatus:self.previewVisible ? @"Live Preview open" : @"Live Preview closed"];
+}
+
+- (void)setPreviewLayoutSideBySideAction:(id)sender {
+    (void)sender;
+    self.previewLayoutMode = PreviewLayoutSideBySide;
+    if (!self.previewVisible) {
+        [self toggleLivePreviewAction:nil];
+    } else {
+        [self relayoutBody];
+        [self updateLivePreview];
+    }
+}
+
+- (void)setPreviewLayoutFullAction:(id)sender {
+    (void)sender;
+    self.previewLayoutMode = PreviewLayoutFullPreview;
+    if (!self.previewVisible) {
+        [self toggleLivePreviewAction:nil];
+    } else {
+        [self relayoutBody];
+        [self updateLivePreview];
+    }
+}
+
+- (void)schedulePreviewUpdate {
+    if (self.isSyncingFromPreview) return;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(updateLivePreview) object:nil];
+    [self performSelector:@selector(updateLivePreview) withObject:nil afterDelay:0.25];
+}
+
+- (void)updateLivePreview {
+    if (!self.previewVisible || !self.previewWebView) return;
+    EditorDocument *doc = [self activeDocument];
+    if (!doc) return;
+
+    NSString *raw = [doc.editor string] ?: @"";
+    NSString *ext = doc.path ? doc.path.pathExtension.lowercaseString : doc.lang;
+    if (ext.length == 0) ext = doc.lang ?: @"markdown";
+
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@[raw, ext] options:0 error:nil];
+    if (!data) return;
+    NSString *jsonArgs = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!jsonArgs) return;
+
+    NSString *modeStr = (self.previewLayoutMode == PreviewLayoutFullPreview) ? @"full" : @"split";
+    NSString *js = [NSString stringWithFormat:
+        @"if (window.updateContent) { const a = %@; window.updateContent(a[0], a[1]); }"
+        @"if (window.setLayoutMode) { window.setLayoutMode('%@'); }", jsonArgs, modeStr];
+    [self.previewWebView evaluateJavaScript:js completionHandler:nil];
+}
+
+#pragma mark - WKScriptMessageHandler (Preview <-> Cocoa)
+
+- (void)userContentController:(WKUserContentController *)userContentController
+      didReceiveScriptMessage:(WKScriptMessage *)message {
+    if (![message.name isEqualToString:@"catatan"]) return;
+    NSDictionary *body = message.body;
+    if (![body isKindOfClass:[NSDictionary class]]) return;
+
+    NSString *type = body[@"type"];
+    if ([type isEqualToString:@"contentChanged"]) {
+        NSString *markdown = body[@"markdown"];
+        if (markdown) {
+            [self applyPreviewEditToActiveDocument:markdown];
+        }
+    } else if ([type isEqualToString:@"setLayoutMode"]) {
+        NSString *mode = body[@"mode"];
+        if ([mode isEqualToString:@"full"]) {
+            self.previewLayoutMode = PreviewLayoutFullPreview;
+        } else {
+            self.previewLayoutMode = PreviewLayoutSideBySide;
+        }
+        [self relayoutBody];
+    } else if ([type isEqualToString:@"closePreview"]) {
+        if (self.previewVisible) {
+            [self toggleLivePreviewAction:nil];
+        }
+    }
+}
+
+- (void)applyPreviewEditToActiveDocument:(NSString *)markdown {
+    EditorDocument *doc = [self activeDocument];
+    if (!doc) return;
+
+    NSString *current = [doc.editor string] ?: @"";
+    if ([current isEqualToString:markdown]) return;
+
+    self.isSyncingFromPreview = YES;
+    [doc.editor setString:markdown];
+    doc.dirty = YES;
+    [self updateUI];
+    self.isSyncingFromPreview = NO;
+}
+
+#pragma mark - Find in Files Delegate & Action
+
+- (void)findInFilesDidProduceResults:(NSArray<SidebarItem *> *)results query:(NSString *)query directory:(NSString *)dir {
+    [self setPanelVisible:YES named:@"Search Results"];
+    NSString *title = [NSString stringWithFormat:@"Search: \"%@\" (%lu hits)", query, (unsigned long)results.count];
+    [self.sidebar setPanelTitle:title items:results];
+    [self.toolbar refresh];
+    [self flashStatus:[NSString stringWithFormat:@"Found %lu occurrences in %@", (unsigned long)results.count, dir.lastPathComponent]];
+}
+
+- (void)findInFilesAction:(id)sender {
+    (void)sender;
+    if (!self.findInFilesController) {
+        self.findInFilesController = [FindInFilesWindowController new];
+        self.findInFilesController.delegate = self;
+    }
+    if (self.workspaceRoot.length > 0) {
+        self.findInFilesController.defaultDirectory = self.workspaceRoot;
+    } else {
+        EditorDocument *doc = [self activeDocument];
+        if (doc.path.length > 0) {
+            self.findInFilesController.defaultDirectory = [doc.path stringByDeletingLastPathComponent];
+        }
+    }
+    [self.findInFilesController showFindInFiles];
+}
+
+#pragma mark - Column Editor Action
+
+- (void)columnEditorAction:(id)sender {
+    (void)sender;
+    EditorDocument *doc = [self activeDocument];
+    if (!doc) return;
+    if (!self.columnEditorController) {
+        self.columnEditorController = [ColumnEditorController new];
+    }
+    self.columnEditorController.targetEditor = doc.editor;
+    [self.columnEditorController showColumnEditor];
+}
+
+#pragma mark - UDL Importer Action
+
+- (void)importUDLAction:(id)sender {
+    (void)sender;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.allowedFileTypes = @[@"xml"];
+    panel.allowsMultipleSelection = NO;
+    panel.canChooseDirectories = NO;
+    panel.prompt = @"Import";
+    panel.message = @"Select a Notepad++ User Defined Language (XML) file";
+    if ([panel runModal] == NSModalResponseOK && panel.URL) {
+        NSError *err = nil;
+        UDLLanguage *lang = [[UDLManager sharedManager] importUDLFromURL:panel.URL error:&err];
+        if (lang) {
+            [self buildMenu];
+            [self flashStatus:[NSString stringWithFormat:@"Imported UDL language '%@' (%lu extensions)",
+                               lang.name, (unsigned long)lang.extensions.count]];
+            EditorDocument *cur = [self activeDocument];
+            if (cur && cur.path) {
+                NSString *mapped = NppLanguageForExtension(cur.path.pathExtension);
+                if ([mapped hasPrefix:@"udl_"]) {
+                    [self applyLanguage:mapped toDocument:cur];
+                }
+            }
+        } else {
+            NSAlert *alert = [NSAlert new];
+            alert.messageText = @"UDL Import Failed";
+            alert.informativeText = err ? err.localizedDescription : @"No valid <UserLang> definition found in XML.";
+            [alert runModal];
+        }
+    }
+}
+
+#pragma mark - AutoUpdater Actions & Delegate
+
+- (void)checkForUpdatesAction:(id)sender {
+    (void)sender;
+    if ([AutoUpdater sharedUpdater].status == AutoUpdateStatusReadyToInstall) {
+        NSAlert *alert = [NSAlert new];
+        alert.messageText = [NSString stringWithFormat:@"Restart Catatan++ to Apply v%@?", [AutoUpdater sharedUpdater].latestVersion];
+        alert.informativeText = @"The update is fully downloaded and ready. Catatan++ will save your session and reopen immediately.";
+        [alert addButtonWithTitle:@"Restart to Update"];
+        [alert addButtonWithTitle:@"Later"];
+        if ([alert runModal] == NSAlertFirstButtonReturn) {
+            [self saveSession];
+            [[AutoUpdater sharedUpdater] relaunchAndInstallUpdate];
+        }
+    } else {
+        [[AutoUpdater sharedUpdater] checkForUpdatesManual:YES];
+    }
+}
+
+- (void)autoUpdater:(AutoUpdater *)updater didChangeStatus:(AutoUpdateStatus)status {
+    if (status == AutoUpdateStatusDownloading) {
+        [self flashStatus:[NSString stringWithFormat:@"Downloading Catatan++ v%@ in background…", updater.latestVersion]];
+    }
+}
+
+- (void)autoUpdaterDidBecomeReadyToInstall:(AutoUpdater *)updater {
+    NSString *title = [NSString stringWithFormat:@"⟳ Restart to Update (v%@)", updater.latestVersion];
+    self.updateMenuItem.title = title;
+    [self flashStatus:[NSString stringWithFormat:@"Update ready: v%@. Click menu to restart and apply.", updater.latestVersion]];
+}
+
 #pragma mark Menu
 
 static NSMutableArray<NSString *> *gLangOrder;
@@ -1427,89 +2523,190 @@ static NSMutableArray<NSString *> *gLangOrder;
 - (void)buildMenu {
     NSMenu *bar = [NSMenu new];
 
+    // Application Menu
+    NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:@"" action:nil keyEquivalent:@""];
+    NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@""];
+    [appMenu addItemWithTitle:@"About catatan++" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+    
+    self.updateMenuItem = [[NSMenuItem alloc] initWithTitle:@"Check for Updates…"
+                                                     action:@selector(checkForUpdatesAction:)
+                                              keyEquivalent:@""];
+    self.updateMenuItem.target = self;
+    [appMenu addItem:self.updateMenuItem];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *prefs = [[NSMenuItem alloc] initWithTitle:@"Preferences…"
+                                                   action:@selector(showPreferences:)
+                                            keyEquivalent:@","];
+    prefs.target = self;
+    [appMenu addItem:prefs];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    [appMenu addItemWithTitle:@"Hide catatan++" action:@selector(hide:) keyEquivalent:@"h"];
+    NSMenuItem *hideOthers = [[NSMenuItem alloc] initWithTitle:@"Hide Others" action:@selector(hideOtherApplications:) keyEquivalent:@"h"];
+    hideOthers.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    [appMenu addItem:hideOthers];
+    [appMenu addItemWithTitle:@"Show All" action:@selector(unhideAllApplications:) keyEquivalent:@""];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    [appMenu addItemWithTitle:@"Quit catatan++" action:@selector(terminate:) keyEquivalent:@"q"];
+    appItem.submenu = appMenu;
+    [bar addItem:appItem];
+
+    // File Menu
     NSMenuItem *fileItem = [[NSMenuItem alloc] initWithTitle:@"File" action:nil keyEquivalent:@""];
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
-
-    NSMenuItem *newTab = [[NSMenuItem alloc] initWithTitle:@"New Tab"
-                                                    action:@selector(newDocument)
-                                             keyEquivalent:@"n"];
+    NSMenuItem *newTab = [[NSMenuItem alloc] initWithTitle:@"New Tab" action:@selector(newDocument) keyEquivalent:@"n"];
     newTab.target = self;
     [fileMenu addItem:newTab];
 
-    NSMenuItem *open = [[NSMenuItem alloc] initWithTitle:@"Open…"
-                                                  action:@selector(openFilePanel)
-                                           keyEquivalent:@"o"];
+    NSMenuItem *open = [[NSMenuItem alloc] initWithTitle:@"Open…" action:@selector(openFilePanel) keyEquivalent:@"o"];
     open.target = self;
     [fileMenu addItem:open];
-
     [fileMenu addItem:[NSMenuItem separatorItem]];
 
-    NSMenuItem *save = [[NSMenuItem alloc] initWithTitle:@"Save"
-                                                  action:@selector(saveCurrent)
-                                           keyEquivalent:@"s"];
+    NSMenuItem *save = [[NSMenuItem alloc] initWithTitle:@"Save" action:@selector(saveCurrent) keyEquivalent:@"s"];
     save.target = self;
     [fileMenu addItem:save];
 
-    NSMenuItem *saveAs = [[NSMenuItem alloc] initWithTitle:@"Save As…"
-                                                    action:@selector(saveCurrentAs)
-                                             keyEquivalent:@"S"];
+    NSMenuItem *saveAs = [[NSMenuItem alloc] initWithTitle:@"Save As…" action:@selector(saveCurrentAs) keyEquivalent:@"S"];
     saveAs.target = self;
     [fileMenu addItem:saveAs];
 
+    NSMenuItem *saveSess = [[NSMenuItem alloc] initWithTitle:@"Save Session" action:@selector(saveSession) keyEquivalent:@""];
+    saveSess.target = self;
+    [fileMenu addItem:saveSess];
+
+    NSMenuItem *restSess = [[NSMenuItem alloc] initWithTitle:@"Restore Session" action:@selector(restoreSession) keyEquivalent:@""];
+    restSess.target = self;
+    [fileMenu addItem:restSess];
     [fileMenu addItem:[NSMenuItem separatorItem]];
 
-    NSMenuItem *closeTab = [[NSMenuItem alloc] initWithTitle:@"Close Tab"
-                                                      action:@selector(closeCurrentTab)
-                                               keyEquivalent:@"w"];
+    NSMenuItem *printItem = [[NSMenuItem alloc] initWithTitle:@"Print…" action:@selector(printActiveDocument) keyEquivalent:@"p"];
+    printItem.target = self;
+    [fileMenu addItem:printItem];
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *closeTab = [[NSMenuItem alloc] initWithTitle:@"Close Tab" action:@selector(closeCurrentTab) keyEquivalent:@"w"];
     closeTab.target = self;
     [fileMenu addItem:closeTab];
-
     fileItem.submenu = fileMenu;
     [bar addItem:fileItem];
 
+    // Edit Menu
     NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"Edit" action:nil keyEquivalent:@""];
     NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
-    [editMenu addItemWithTitle:@"Undo" action:@selector(undo:) keyEquivalent:@"z"];
-    [editMenu addItemWithTitle:@"Redo" action:@selector(redo:) keyEquivalent:@"Z"];
+    NSMenuItem *undoItem = [[NSMenuItem alloc] initWithTitle:@"Undo" action:@selector(undo:) keyEquivalent:@"z"];
+    undoItem.target = self;
+    [editMenu addItem:undoItem];
+    NSMenuItem *redoItem = [[NSMenuItem alloc] initWithTitle:@"Redo" action:@selector(redo:) keyEquivalent:@"Z"];
+    redoItem.target = self;
+    [editMenu addItem:redoItem];
     [editMenu addItem:[NSMenuItem separatorItem]];
     [editMenu addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
     [editMenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
     [editMenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
     [editMenu addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
     [editMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *find = [[NSMenuItem alloc] initWithTitle:@"Find…"
-                                                  action:@selector(findAction:)
-                                           keyEquivalent:@"f"];
+
+    NSMenuItem *find = [[NSMenuItem alloc] initWithTitle:@"Find…" action:@selector(findAction:) keyEquivalent:@"f"];
     find.target = self;
     [editMenu addItem:find];
+
+    NSMenuItem *repl = [[NSMenuItem alloc] initWithTitle:@"Replace…" action:@selector(replaceAction:) keyEquivalent:@"F"];
+    repl.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    repl.target = self;
+    [editMenu addItem:repl];
+
+    NSMenuItem *fif = [[NSMenuItem alloc] initWithTitle:@"Find in Files…" action:@selector(findInFilesAction:) keyEquivalent:@"F"];
+    fif.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    fif.target = self;
+    [editMenu addItem:fif];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *colEd = [[NSMenuItem alloc] initWithTitle:@"Column Editor…" action:@selector(columnEditorAction:) keyEquivalent:@"c"];
+    colEd.keyEquivalentModifierMask = NSEventModifierFlagOption;
+    colEd.target = self;
+    [editMenu addItem:colEd];
     editItem.submenu = editMenu;
     [bar addItem:editItem];
 
+    // View Menu
     NSMenuItem *viewItem = [[NSMenuItem alloc] initWithTitle:@"View" action:nil keyEquivalent:@""];
     NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
-    NSMenuItem *split = [[NSMenuItem alloc] initWithTitle:@"Split View"
-                                                   action:@selector(toggleSplitViewAction:)
-                                            keyEquivalent:@""];
+    NSMenuItem *split = [[NSMenuItem alloc] initWithTitle:@"Split View" action:@selector(toggleSplitViewAction:) keyEquivalent:@""];
     split.target = self;
     [viewMenu addItem:split];
+
+    NSMenuItem *previewItem = [[NSMenuItem alloc] initWithTitle:@"Live Preview (Markdown / Mermaid / PlantUML)" action:@selector(toggleLivePreviewAction:) keyEquivalent:@"p"];
+    previewItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    previewItem.target = self;
+    [viewMenu addItem:previewItem];
+
+    NSMenuItem *previewSplit = [[NSMenuItem alloc] initWithTitle:@"Preview Layout: Side by Side" action:@selector(setPreviewLayoutSideBySideAction:) keyEquivalent:@""];
+    previewSplit.target = self;
+    [viewMenu addItem:previewSplit];
+
+    NSMenuItem *previewFull = [[NSMenuItem alloc] initWithTitle:@"Preview Layout: Full Window" action:@selector(setPreviewLayoutFullAction:) keyEquivalent:@""];
+    previewFull.target = self;
+    [viewMenu addItem:previewFull];
     [viewMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *next = [[NSMenuItem alloc] initWithTitle:@"Next Tab"
-                                                  action:@selector(nextTab)
-                                           keyEquivalent:@"]"];
+    NSMenuItem *next = [[NSMenuItem alloc] initWithTitle:@"Next Tab" action:@selector(nextTab) keyEquivalent:@"]"];
     next.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     next.target = self;
     [viewMenu addItem:next];
-    NSMenuItem *prev = [[NSMenuItem alloc] initWithTitle:@"Previous Tab"
-                                                  action:@selector(previousTab)
-                                           keyEquivalent:@"["];
+    NSMenuItem *prev = [[NSMenuItem alloc] initWithTitle:@"Previous Tab" action:@selector(previousTab) keyEquivalent:@"["];
     prev.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     prev.target = self;
     [viewMenu addItem:prev];
     viewItem.submenu = viewMenu;
     [bar addItem:viewItem];
 
+    // Settings Menu
+    NSMenuItem *settingsItem = [[NSMenuItem alloc] initWithTitle:@"Settings" action:nil keyEquivalent:@""];
+    NSMenu *settingsMenu = [[NSMenu alloc] initWithTitle:@"Settings"];
+    NSMenuItem *prefsMenu = [[NSMenuItem alloc] initWithTitle:@"Preferences…" action:@selector(showPreferences:) keyEquivalent:@""];
+    prefsMenu.target = self;
+    [settingsMenu addItem:prefsMenu];
+    settingsItem.submenu = settingsMenu;
+    [bar addItem:settingsItem];
+
+    // Language Menu
     NSMenuItem *langItem = [[NSMenuItem alloc] initWithTitle:@"Language" action:nil keyEquivalent:@""];
     NSMenu *langMenu = [[NSMenu alloc] initWithTitle:@"Language"];
+
+    NSMenuItem *importUDL = [[NSMenuItem alloc] initWithTitle:@"Import User Defined Language (XML)…"
+                                                       action:@selector(importUDLAction:)
+                                                keyEquivalent:@""];
+    importUDL.target = self;
+    [langMenu addItem:importUDL];
+    [langMenu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *mdItem = [[NSMenuItem alloc] initWithTitle:@"Markdown" action:@selector(selectLanguage:) keyEquivalent:@""];
+    mdItem.target = self; mdItem.representedObject = @"markdown";
+    [langMenu addItem:mdItem];
+
+    NSMenuItem *mrmItem = [[NSMenuItem alloc] initWithTitle:@"Mermaid" action:@selector(selectLanguage:) keyEquivalent:@""];
+    mrmItem.target = self; mrmItem.representedObject = @"mermaid";
+    [langMenu addItem:mrmItem];
+
+    NSMenuItem *pumlItem = [[NSMenuItem alloc] initWithTitle:@"PlantUML" action:@selector(selectLanguage:) keyEquivalent:@""];
+    pumlItem.target = self; pumlItem.representedObject = @"plantuml";
+    [langMenu addItem:pumlItem];
+
+    NSArray<UDLLanguage *> *udls = [[UDLManager sharedManager] allLanguages];
+    if (udls.count > 0) {
+        [langMenu addItem:[NSMenuItem separatorItem]];
+        for (UDLLanguage *u in udls) {
+            NSString *langID = [NSString stringWithFormat:@"udl_%@", u.name];
+            NSMenuItem *mi = [[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"UDL: %@", u.name]
+                                                        action:@selector(selectLanguage:)
+                                                 keyEquivalent:@""];
+            mi.target = self;
+            mi.representedObject = langID;
+            [langMenu addItem:mi];
+        }
+    }
+    [langMenu addItem:[NSMenuItem separatorItem]];
+
     for (NSString *langID in gLangOrder) {
         NSMenuItem *mi = [[NSMenuItem alloc] initWithTitle:NppLanguageLabel(langID)
                                                     action:@selector(selectLanguage:)
@@ -1533,10 +2730,16 @@ static NSMutableArray<NSString *> *gLangOrder;
                                               styleMask:wstyle
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
+    self.window.delegate = (id<NSWindowDelegate>)self;
     [self.window center];
     [self.window setMinSize:NSMakeSize(520, 320)];
 
     NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 1000, 720)];
+    content.postsFrameChangedNotifications = YES;
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onContentViewFrameChanged:)
+                                                 name:NSViewFrameDidChangeNotification
+                                               object:content];
 
     const CGFloat kToolbarH = 34.0;
     const CGFloat kTabH = 30.0;
@@ -1593,11 +2796,12 @@ static NSMutableArray<NSString *> *gLangOrder;
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
     setvbuf(stdout, NULL, _IONBF, 0);
     gLangOrder = [[NSMutableArray alloc] initWithArray:NppLanguageIDs()];
-    self.documents = [NSMutableArray array];
+    if (!self.documents) self.documents = [NSMutableArray array];
     self.iconDirectory = [[NSBundle mainBundle] pathForResource:@"icons" ofType:nil];
-    self.activeIndex = -1;
 
     [self buildWindow];
+    [[UDLManager sharedManager] loadSavedUDLs];
+    [self buildMenu];
 
     if (self.selfTestPath) {
         self.suppressAlerts = YES;
@@ -1606,12 +2810,12 @@ static NSMutableArray<NSString *> *gLangOrder;
         exit(failures == 0 ? 0 : 1);
     }
 
-    [self newDocument];
-    [self buildMenu];
-
     if (self.pendingPaths.count > 0) {
-        for (NSString *path in self.pendingPaths) [self openDocument:path];
-        [self closeDocumentAtIndex:0];
+        NSArray<NSString *> *toOpen = [self.pendingPaths copy];
+        [self.pendingPaths removeAllObjects];
+        for (NSString *path in toOpen) {
+            [self openDocument:path];
+        }
         if (getenv("NPP_REPORT_TABS")) {
             printf("LAUNCH_TABS count=%lu active=%ld titles=",
                    (unsigned long)self.documents.count, (long)self.activeIndex);
@@ -1620,18 +2824,81 @@ static NSMutableArray<NSString *> *gLangOrder;
             printf("\n");
             exit(0);
         }
+    } else {
+        BOOL restored = [self restoreSession];
+        if (!restored) {
+            [self newDocument];
+        }
+    }
+
+    if (self.documents.count == 0) {
+        [self newDocument];
     }
 
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
     [self updateUI];
+
+    [AutoUpdater sharedUpdater].delegate = self;
+    if (!self.selfTestPath) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [[AutoUpdater sharedUpdater] checkForUpdatesManual:NO];
+        });
+    }
+}
+
+- (void)applicationWillTerminate:(NSNotification *)aNotification {
+    [self saveSession];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender { return YES; }
 
+- (void)openFilesAndReplaceBlankIfNeeded:(NSArray<NSString *> *)filenames {
+    BOOL replaceBlank = NO;
+    if (self.documents.count == 1) {
+        EditorDocument *onlyDoc = self.documents[0];
+        // If the only document is an untouched, empty untitled document
+        if (onlyDoc.path == nil && !onlyDoc.dirty && [onlyDoc.editor string].length == 0) {
+            replaceBlank = YES;
+        }
+    }
+
+    for (NSString *path in filenames) {
+        if (path.length > 0) {
+            [self openDocument:path];
+        }
+    }
+
+    if (replaceBlank && self.documents.count > 1) {
+        [self closeDocumentAtIndex:0];
+    }
+}
+
 - (void)application:(NSApplication *)sender openFiles:(NSArray<NSString *> *)filenames {
-    for (NSString *path in filenames) [self openDocument:path];
+    if (!self.window) {
+        // App is still launching (before applicationDidFinishLaunching): queue files
+        for (NSString *p in filenames) {
+            if (![self.pendingPaths containsObject:p]) {
+                [self.pendingPaths addObject:p];
+            }
+        }
+    } else {
+        // App window is already up: open directly
+        [self openFilesAndReplaceBlankIfNeeded:filenames];
+    }
     [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
+}
+
+- (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename {
+    if (!filename || filename.length == 0) return NO;
+    if (!self.window) {
+        if (![self.pendingPaths containsObject:filename]) {
+            [self.pendingPaths addObject:filename];
+        }
+    } else {
+        [self openFilesAndReplaceBlankIfNeeded:@[filename]];
+    }
+    return YES;
 }
 
 #pragma mark Self test
@@ -2067,6 +3334,46 @@ static NSMutableArray<NSString *> *gLangOrder;
         printf("%s undo/redo len %ld->%ld->%ld\n",
                (len2 < len1 && len3 == len1) ? "OK  " : "FAIL", len1, len2, len3);
         if (!(len2 < len1 && len3 == len1)) failures++;
+
+        // Best-practice multi-line undo coalescing test:
+        // When typing multiple lines, undo must not clear all lines at once.
+        EditorDocument *curDoc = [self activeDocument];
+        [sci setString:@""];
+        [sci setGeneralProperty:SCI_EMPTYUNDOBUFFER parameter:0 value:0];
+        auto typeToDoc = ^(NSString *s) {
+            for (NSUInteger i = 0; i < s.length; i++) {
+                unichar ch = [s characterAtIndex:i];
+                char c = (char)ch;
+                [sci setGeneralProperty:SCI_ADDTEXT parameter:1 value:(sptr_t)&c];
+                SCNotification n{};
+                n.nmhdr.code = SCN_CHARADDED;
+                n.ch = ch;
+                [self handleNotification:&n forDocument:curDoc];
+                SCNotification u{};
+                u.nmhdr.code = SCN_UPDATEUI;
+                u.updated = SC_UPDATE_SELECTION;
+                [self handleNotification:&u forDocument:curDoc];
+            }
+        };
+        typeToDoc(@"Baris 1\n");
+        typeToDoc(@"Baris 2\n");
+        typeToDoc(@"Baris 3");
+        NSString *txtBeforeUndo = [sci string];
+        [self performUndo];
+        NSString *txtAfterUndo1 = [sci string];
+        BOOL multilineUndoOk = [txtAfterUndo1 containsString:@"Baris 1\n"] &&
+                               [txtAfterUndo1 containsString:@"Baris 2\n"] &&
+                               ![txtAfterUndo1 containsString:@"Baris 3"];
+        printf("%s multi-line undo coalescing preserves prior lines (%lu->%lu chars)\n",
+               multilineUndoOk ? "OK  " : "FAIL",
+               (unsigned long)txtBeforeUndo.length, (unsigned long)txtAfterUndo1.length);
+        if (!multilineUndoOk) failures++;
+
+        [self performRedo];
+        NSString *txtAfterRedo = [sci string];
+        BOOL redoRestored = [txtAfterRedo isEqualToString:txtBeforeUndo];
+        printf("%s redo restores exact multi-line state\n", redoRestored ? "OK  " : "FAIL");
+        if (!redoRestored) failures++;
 
         // file_new must add a tab
         NSInteger iNew = [tb indexOfCommand:@"file_new"];
@@ -2569,6 +3876,367 @@ static NSMutableArray<NSString *> *gLangOrder;
                before, after);
         if (!(before != SCE_C_WORD && after == SCE_C_WORD)) failures++;
         self.customKeywords = nil;
+    }
+
+    printf("== print syntax colouring ==\n");
+    {
+        [self.editor setString:@"int value = 42;\n// comment here\n"];
+        [self applyLanguage:@"cpp" toDocument:[self activeDocument]];
+        [self.editor setGeneralProperty:SCI_COLOURISE parameter:0 value:-1];
+
+        PrintTextView *pv = [[PrintTextView alloc] initWithEditor:self.editor
+                                                             text:[self.editor string]
+                                                        pageRange:NSMakeRange(1, 1)];
+        pv.frame = NSMakeRect(0, 0, 595, 842);
+        NSBitmapImageRep *rep = [pv bitmapImageRepForCachingDisplayInRect:pv.bounds];
+        [pv cacheDisplayInRect:pv.bounds toBitmapImageRep:rep];
+
+        NSMutableSet *distinctColors = [NSMutableSet set];
+        for (NSInteger y = 0; y < rep.pixelsHigh; y += 2) {
+            for (NSInteger x = 0; x < rep.pixelsWide; x += 2) {
+                NSColor *c = [rep colorAtX:x y:y];
+                if (c.brightnessComponent < 0.85) {
+                    int r = (int)(c.redComponent * 10);
+                    int g = (int)(c.greenComponent * 10);
+                    int b = (int)(c.blueComponent * 10);
+                    [distinctColors addObject:[NSString stringWithFormat:@"%d,%d,%d", r, g, b]];
+                }
+            }
+        }
+        BOOL hasColor = (distinctColors.count >= 2);
+        printf("%s print syntax colors=%lu (>1)\n", hasColor ? "OK  " : "FAIL", (unsigned long)distinctColors.count);
+        if (!hasColor) failures++;
+    }
+
+    printf("== extended function list ==\n");
+    {
+        // Bash
+        NSString *bashCode = @"function deploy {\n  echo 1\n}\nbuild() {\n  echo 2\n}\n";
+        NSArray *bashFuncs = [self functionItemsForText:bashCode language:@"bash"];
+        BOOL bashOK = (bashFuncs.count == 2);
+        printf("%s bash functions=%lu expected=2\n", bashOK ? "OK  " : "FAIL", (unsigned long)bashFuncs.count);
+        if (!bashOK) failures++;
+
+        // SQL
+        NSString *sqlCode = @"CREATE FUNCTION calc_tax(val INT) RETURNS INT;\nCREATE PROCEDURE reset_all();\n";
+        NSArray *sqlFuncs = [self functionItemsForText:sqlCode language:@"sql"];
+        BOOL sqlOK = (sqlFuncs.count == 2);
+        printf("%s sql functions=%lu expected=2\n", sqlOK ? "OK  " : "FAIL", (unsigned long)sqlFuncs.count);
+        if (!sqlOK) failures++;
+
+        // Ruby
+        NSString *rbCode = @"class Worker\n  def process\n  end\nend\n";
+        NSArray *rbFuncs = [self functionItemsForText:rbCode language:@"ruby"];
+        BOOL rbOK = (rbFuncs.count == 2);
+        printf("%s ruby definitions=%lu expected=2\n", rbOK ? "OK  " : "FAIL", (unsigned long)rbFuncs.count);
+        if (!rbOK) failures++;
+
+        // Perl
+        NSString *plCode = @"sub execute_task {\n  my $arg = shift;\n}\n";
+        NSArray *plFuncs = [self functionItemsForText:plCode language:@"perl"];
+        BOOL plOK = (plFuncs.count == 1);
+        printf("%s perl subroutines=%lu expected=1\n", plOK ? "OK  " : "FAIL", (unsigned long)plFuncs.count);
+        if (!plOK) failures++;
+
+        // R
+        NSString *rCode = @"compute_stat <- function(data) {\n  return(mean(data))\n}\n";
+        NSArray *rFuncs = [self functionItemsForText:rCode language:@"r"];
+        BOOL rOK = (rFuncs.count == 1);
+        printf("%s r functions=%lu expected=1\n", rOK ? "OK  " : "FAIL", (unsigned long)rFuncs.count);
+        if (!rOK) failures++;
+
+        // Markdown
+        NSString *mdCode = @"# Main Title\n## Getting Started\n### Setup\n";
+        NSArray *mdFuncs = [self functionItemsForText:mdCode language:@"markdown"];
+        BOOL mdOK = (mdFuncs.count == 3);
+        printf("%s markdown headers=%lu expected=3\n", mdOK ? "OK  " : "FAIL", (unsigned long)mdFuncs.count);
+        if (!mdOK) failures++;
+    }
+
+    printf("== find and replace ==\n");
+    {
+        [self.editor setString:@"alpha beta alpha gamma alpha"];
+        BOOL findFwd = [self performFind:@"beta" matchCase:YES wholeWord:YES wrap:YES backwards:NO];
+        printf("%s find forward=%d expected=1\n", findFwd ? "OK  " : "FAIL", findFwd);
+        if (!findFwd) failures++;
+
+        BOOL findBack = [self performFind:@"alpha" matchCase:YES wholeWord:YES wrap:YES backwards:YES];
+        printf("%s find backward=%d expected=1\n", findBack ? "OK  " : "FAIL", findBack);
+        if (!findBack) failures++;
+
+        int repOne = [self performReplace:@"alpha" with:@"delta" matchCase:YES wholeWord:YES all:NO];
+        printf("%s replace single=%d expected=1\n", (repOne == 1) ? "OK  " : "FAIL", repOne);
+        if (repOne != 1) failures++;
+
+        int repAll = [self performReplace:@"alpha" with:@"omega" matchCase:YES wholeWord:YES all:YES];
+        printf("%s replace all=%d expected=2\n", (repAll == 2) ? "OK  " : "FAIL", repAll);
+        if (repAll != 2) failures++;
+
+        NSString *res = [self.editor string];
+        BOOL matchExpected = [res isEqualToString:@"delta beta omega gamma omega"];
+        printf("%s result content='%s'\n", matchExpected ? "OK  " : "FAIL", [res UTF8String]);
+        if (!matchExpected) failures++;
+    }
+
+    printf("== preferences engine ==\n");
+    {
+        NSInteger origTab = [self.editor getGeneralProperty:SCI_GETTABWIDTH parameter:0];
+        [self setTestPreferenceFont:@"Monaco" size:16 tabWidth:2 useSpaces:YES wordWrap:YES lineNumbers:NO];
+        NSInteger newTab = [self.editor getGeneralProperty:SCI_GETTABWIDTH parameter:0];
+        NSInteger newSize = [self.editor getGeneralProperty:SCI_STYLEGETSIZE parameter:STYLE_DEFAULT];
+        BOOL tabOK = (newTab == 2);
+        BOOL sizeOK = (newSize == 16);
+        printf("%s tab width pref=%ld expected=2\n", tabOK ? "OK  " : "FAIL", (long)newTab);
+        printf("%s font size pref=%ld expected=16\n", sizeOK ? "OK  " : "FAIL", (long)newSize);
+        if (!tabOK || !sizeOK) failures++;
+
+        // Restore standard default
+        [self setTestPreferenceFont:@"Menlo" size:13 tabWidth:origTab useSpaces:YES wordWrap:NO lineNumbers:YES];
+    }
+
+    printf("== session restoration ==\n");
+    {
+        NSString *sessPath = [self sessionFilePath];
+        [[NSFileManager defaultManager] removeItemAtPath:sessPath error:NULL];
+
+        // Give doc a dummy path and save session
+        EditorDocument *doc = [self activeDocument];
+        NSString *origPath = doc.path;
+        doc.path = @"/tmp/test_session_doc.txt";
+        [self saveSession];
+
+        BOOL exists = [[NSFileManager defaultManager] fileExistsAtPath:sessPath];
+        NSDictionary *dict = exists ? [NSDictionary dictionaryWithContentsOfFile:sessPath] : nil;
+        NSArray *docs = dict[@"documents"];
+        BOOL sessionOK = exists && docs.count >= 1 && [docs[0][@"path"] isEqualToString:@"/tmp/test_session_doc.txt"];
+
+        printf("%s session saved exists=%d entries=%lu\n",
+               sessionOK ? "OK  " : "FAIL", exists, (unsigned long)docs.count);
+        if (!sessionOK) failures++;
+
+        doc.path = origPath;
+        [[NSFileManager defaultManager] removeItemAtPath:sessPath error:NULL];
+    }
+
+    // == find in files ==
+    printf("== find in files ==\n");
+    {
+        NSString *fifDir = @"/tmp/fif_test";
+        [[NSFileManager defaultManager] createDirectoryAtPath:fifDir withIntermediateDirectories:YES attributes:nil error:NULL];
+        [@"first line with fif_target_word here\n" writeToFile:[fifDir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [@"second file\nanother fif_target_word occurs\n" writeToFile:[fifDir stringByAppendingPathComponent:@"b.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+
+        NSArray<SidebarItem *> *hits = [FindInFilesEngine searchForString:@"fif_target_word"
+                                                              inDirectory:fifDir
+                                                                   filter:@"*.txt"
+                                                                matchCase:YES
+                                                                wholeWord:YES
+                                                                  subdirs:YES];
+        BOOL fifOK = (hits.count == 2);
+        printf("%s find in files hits=%lu expected=2\n", fifOK ? "OK  " : "FAIL", (unsigned long)hits.count);
+        if (!fifOK) failures++;
+
+        [[NSFileManager defaultManager] removeItemAtPath:fifDir error:NULL];
+    }
+
+    // == column editor ==
+    printf("== column editor ==\n");
+    {
+        EditorDocument *doc = [self activeDocument];
+        [doc.editor setString:@"apple\nbanana\ncherry\n"];
+        [doc.editor setGeneralProperty:SCI_SETSEL parameter:0 value:0];
+
+        BOOL tOK = [ColumnEditorController applyText:@"PREFIX_" toEditor:doc.editor];
+        NSString *cur = [doc.editor string];
+        BOOL tMatch = [cur containsString:@"PREFIX_apple\nPREFIX_banana\nPREFIX_cherry\n"];
+        printf("%s column editor insert text applied=%d matched=%d\n", (tOK && tMatch) ? "OK  " : "FAIL", tOK, tMatch);
+        if (!(tOK && tMatch)) failures++;
+
+        [doc.editor setString:@"row\nrow\nrow\n"];
+        [doc.editor setGeneralProperty:SCI_SETSEL parameter:0 value:0];
+        BOOL nOK = [ColumnEditorController applyNumbersInitial:10 step:5 repeat:1 format:@"Dec" leadingZeros:NO toEditor:doc.editor];
+        NSString *curN = [doc.editor string];
+        BOOL nMatch = [curN containsString:@"10row\n15row\n20row\n"];
+        printf("%s column editor insert numbers applied=%d matched=%d\n", (nOK && nMatch) ? "OK  " : "FAIL", nOK, nMatch);
+        if (!(nOK && nMatch)) failures++;
+    }
+
+    // == udl importer ==
+    printf("== udl importer ==\n");
+    {
+        NSString *udlXML = @"<NotepadPlus><UserLang name=\"TestUDL\" ext=\"tudl\"><KeywordLists><Keywords name=\"Words1\">alpha beta gamma</Keywords></KeywordLists></UserLang></NotepadPlus>";
+        NSString *xmlPath = @"/tmp/test_udl.xml";
+        [udlXML writeToFile:xmlPath atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+
+        NSError *err = nil;
+        UDLLanguage *imported = [[UDLManager sharedManager] importUDLFromURL:[NSURL fileURLWithPath:xmlPath] error:&err];
+        NSString *resolved = NppLanguageForExtension(@"tudl");
+        BOOL udlOK = (imported != nil) && [resolved isEqualToString:@"udl_TestUDL"];
+        printf("%s udl imported name=%s resolved_lang=%s\n", udlOK ? "OK  " : "FAIL",
+               [imported.name UTF8String], [resolved UTF8String]);
+        if (!udlOK) failures++;
+
+        [[NSFileManager defaultManager] removeItemAtPath:xmlPath error:NULL];
+    }
+
+    // == markdown, mermaid, plantuml & live preview ==
+    printf("== previewer & diagrams ==\n");
+    {
+        NSString *lMD = NppLanguageForExtension(@"md");
+        NSString *lMermaid = NppLanguageForExtension(@"mermaid");
+        NSString *lPUML = NppLanguageForExtension(@"puml");
+        BOOL extsOK = [lMD isEqualToString:@"markdown"] &&
+                      [lMermaid isEqualToString:@"mermaid"] &&
+                      [lPUML isEqualToString:@"plantuml"];
+        printf("%s diagram extensions md=%s mermaid=%s puml=%s\n",
+               extsOK ? "OK  " : "FAIL", [lMD UTF8String], [lMermaid UTF8String], [lPUML UTF8String]);
+        if (!extsOK) failures++;
+
+        [self toggleLivePreviewAction:nil];
+        BOOL prevOpen = self.previewVisible && (self.previewWebView != nil) && (self.previewWebView.superview != nil);
+        
+        // Test Side-by-Side vs Full Window preview layout modes
+        [self setPreviewLayoutSideBySideAction:nil];
+        BOOL sideBySideOK = (self.previewLayoutMode == PreviewLayoutSideBySide) &&
+                            !self.editorContainer.hidden && !self.previewWebView.hidden &&
+                            (NSWidth(self.previewWebView.frame) < NSWidth(self.contentView.bounds));
+        
+        [self setPreviewLayoutFullAction:nil];
+        BOOL fullOK = (self.previewLayoutMode == PreviewLayoutFullPreview) &&
+                      self.editorContainer.hidden && !self.previewWebView.hidden &&
+                      (NSWidth(self.previewWebView.frame) == NSWidth(self.contentView.bounds));
+        
+        printf("%s preview layout modes split=%d full=%d\n",
+               (sideBySideOK && fullOK) ? "OK  " : "FAIL", sideBySideOK, fullOK);
+        if (!sideBySideOK || !fullOK) failures++;
+
+        // Test dynamic window resize responsiveness
+        NSRect origBounds = self.contentView.bounds;
+        self.contentView.frame = NSMakeRect(0, 0, 1400, 900);
+        [self relayoutBody];
+        CGFloat expectedH = 900.0 - 34.0 - 30.0 - 22.0; // totalH - kToolbarH - kTabH - kBodyBottom
+        BOOL responsiveOK = (NSHeight(self.previewWebView.frame) == expectedH) &&
+                            (NSWidth(self.previewWebView.frame) == 1400.0);
+        printf("%s preview resize responsive height=%.0f expected=%.0f width=%.0f\n",
+               responsiveOK ? "OK  " : "FAIL", NSHeight(self.previewWebView.frame), expectedH, NSWidth(self.previewWebView.frame));
+        if (!responsiveOK) failures++;
+        self.contentView.frame = origBounds;
+        [self relayoutBody];
+
+        // Test direct markdown preview editing sync
+        NSString *testMD = @"# Edited In Preview\n\nDirect Markdown editing works!";
+        [self applyPreviewEditToActiveDocument:testMD];
+        EditorDocument *curDoc = [self activeDocument];
+        BOOL syncOK = [[curDoc.editor string] isEqualToString:testMD] && curDoc.dirty;
+        printf("%s direct preview edit syncs to editor=%d dirty=%d\n",
+               syncOK ? "OK  " : "FAIL", syncOK, curDoc.dirty);
+        if (!syncOK) failures++;
+
+        [self toggleLivePreviewAction:nil];
+        BOOL prevClosed = !self.previewVisible && (self.previewWebView.superview == nil);
+
+        printf("%s live preview toggle open=%d closed=%d\n",
+               (prevOpen && prevClosed) ? "OK  " : "FAIL", prevOpen, prevClosed);
+        if (!(prevOpen && prevClosed)) failures++;
+    }
+
+    // == Finder "Open With" & openFiles: handling ==
+    printf("== finder open with ==\n");
+    {
+        // 1. Test cold launch queued open before window was created
+        AppDelegate *coldDelegate = [AppDelegate new];
+        NSString *testFileA = @"/tmp/test_cold_launch.txt";
+        [@"cold launch content\n" writeToFile:testFileA atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        
+        // Finder sends openFiles: BEFORE applicationDidFinishLaunching:
+        [coldDelegate application:NSApp openFiles:@[testFileA]];
+        BOOL queuedOK = (coldDelegate.pendingPaths.count == 1) &&
+                        [coldDelegate.pendingPaths[0] isEqualToString:testFileA];
+        
+        // Now simulate applicationDidFinishLaunching: running
+        [coldDelegate applicationDidFinishLaunching:[NSNotification notificationWithName:@"launch" object:nil]];
+        BOOL openedColdOK = (coldDelegate.documents.count == 1) &&
+                            [coldDelegate.documents[0].displayName isEqualToString:@"test_cold_launch.txt"] &&
+                            [[coldDelegate.documents[0].editor string] isEqualToString:@"cold launch content\n"];
+        printf("%s cold launch finder open queued=%d opened=%d\n",
+               (queuedOK && openedColdOK) ? "OK  " : "FAIL", queuedOK, openedColdOK);
+        if (!queuedOK || !openedColdOK) failures++;
+        [coldDelegate.window close];
+
+        // 2. Test warm launch replacing empty untitled tab
+        [self resetDocuments];
+        [self newDocument]; // single empty untitled
+        NSString *testFileB = @"/tmp/test_warm_launch.txt";
+        [@"warm launch content\n" writeToFile:testFileB atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [self application:NSApp openFiles:@[testFileB]];
+        BOOL warmReplacedBlankOK = (self.documents.count == 1) &&
+                                   [self.documents[0].displayName isEqualToString:@"test_warm_launch.txt"];
+        printf("%s warm launch finder open replaces blank=%d\n",
+               warmReplacedBlankOK ? "OK  " : "FAIL", warmReplacedBlankOK);
+        if (!warmReplacedBlankOK) failures++;
+
+        [[NSFileManager defaultManager] removeItemAtPath:testFileA error:NULL];
+        [[NSFileManager defaultManager] removeItemAtPath:testFileB error:NULL];
+    }
+
+    // == Context Menus (Tab and Editor) ==
+    printf("== context menus ==\n");
+    {
+        // 1. Tab Context Menu
+        NSMenu *tabMenu = [self tabStrip:self.tabStrip menuForTabIndex:0];
+        BOOL tabMenuHasPreview = NO;
+        for (NSMenuItem *item in tabMenu.itemArray) {
+            if ([item.identifier isEqualToString:@"tab_ctx_preview"]) {
+                tabMenuHasPreview = YES;
+                break;
+            }
+        }
+        printf("%s tab context menu contains live preview=%d\n",
+               tabMenuHasPreview ? "OK  " : "FAIL", tabMenuHasPreview);
+        if (!tabMenuHasPreview) failures++;
+
+        // 2. Editor Context Menu
+        NSMenu *editorMenu = self.editor.menu;
+        BOOL editorMenuHasPreview = NO;
+        for (NSMenuItem *item in editorMenu.itemArray) {
+            if ([item.identifier isEqualToString:@"ctx_preview"]) {
+                editorMenuHasPreview = YES;
+                break;
+            }
+        }
+        printf("%s editor context menu contains live preview=%d\n",
+               editorMenuHasPreview ? "OK  " : "FAIL", editorMenuHasPreview);
+        if (!editorMenuHasPreview) failures++;
+
+        // 3. Check state update on menuNeedsUpdate:
+        self.previewVisible = YES;
+        self.previewLayoutMode = PreviewLayoutFullPreview;
+        [self menuNeedsUpdate:editorMenu];
+        NSMenuItem *prevItem = [editorMenu itemWithTitle:@"Live Preview (Markdown / Mermaid / PlantUML)"];
+        NSMenuItem *fullItem = [editorMenu itemWithTitle:@"Preview Layout: Full Window"];
+        BOOL stateOK = (prevItem.state == NSControlStateValueOn) && (fullItem.state == NSControlStateValueOn);
+        printf("%s context menu checkmarks update dynamically=%d\n", stateOK ? "OK  " : "FAIL", stateOK);
+        if (!stateOK) failures++;
+        self.previewVisible = NO;
+    }
+
+    // == AutoUpdater Engine ==
+    printf("== auto updater ==\n");
+    {
+        BOOL comp1 = ([AutoUpdater compareVersion:@"1.0.1" toVersion:@"1.0.0"] == NSOrderedDescending);
+        BOOL comp2 = ([AutoUpdater compareVersion:@"1.0.0" toVersion:@"1.0.0"] == NSOrderedSame);
+        BOOL comp3 = ([AutoUpdater compareVersion:@"1.0.0" toVersion:@"1.0.1"] == NSOrderedAscending);
+        BOOL comp4 = ([AutoUpdater compareVersion:@"v2.0" toVersion:@"1.9.9"] == NSOrderedDescending);
+        BOOL versionsOK = comp1 && comp2 && comp3 && comp4;
+        printf("%s auto updater semantic version comparison=%d\n", versionsOK ? "OK  " : "FAIL", versionsOK);
+        if (!versionsOK) failures++;
+
+        AutoUpdater *u = [AutoUpdater sharedUpdater];
+        BOOL updaterOK = (u != nil) && [u.repoOwner isEqualToString:@"anggun-indra"] && [u.repoName isEqualToString:@"catatan-plus-plus"];
+        BOOL menuOK = (self.updateMenuItem != nil) && [self.updateMenuItem.title containsString:@"Update"];
+        printf("%s auto updater repo=%s/%s menuBound=%d\n",
+               (updaterOK && menuOK) ? "OK  " : "FAIL", [u.repoOwner UTF8String], [u.repoName UTF8String], menuOK);
+        if (!updaterOK || !menuOK) failures++;
     }
 
     printf("SELFTEST_DONE failures=%d\n", failures);
