@@ -270,6 +270,10 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) NSMenuItem *updateMenuItem;
 @property (nonatomic, strong) NSMenuItem *helpUpdateMenuItem;
+@property (nonatomic, strong) NSMenuItem *autoUpdateToggleMenuItem;
+@property (nonatomic, strong) NSButton *bottomRestartButton;
+@property (nonatomic, strong) NSButton *bottomDismissUpdateButton;
+@property (nonatomic, strong) NSButton *prefAutoUpdateCheck;
 @property (nonatomic, strong) ToolbarView *toolbar;
 @property (nonatomic, strong) SidebarView *sidebar;
 @property (nonatomic, strong) WKWebView *previewWebView;
@@ -1215,31 +1219,31 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
 }
 
 - (void)buildPrefsWindow {
-    self.prefsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(200, 200, 380, 260)
+    self.prefsWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(200, 200, 380, 295)
                                                    styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                                                      backing:NSBackingStoreBuffered
                                                        defer:NO];
     self.prefsWindow.title = @"Preferences - catatan++";
-    NSView *cv = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 260)];
+    NSView *cv = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 295)];
 
     // Font selection
-    NSTextField *lblFont = [[NSTextField alloc] initWithFrame:NSMakeRect(24, 218, 90, 20)];
+    NSTextField *lblFont = [[NSTextField alloc] initWithFrame:NSMakeRect(24, 252, 90, 20)];
     lblFont.stringValue = @"Font Family:";
     lblFont.editable = NO; lblFont.bezeled = NO; lblFont.drawsBackground = NO;
     [cv addSubview:lblFont];
 
-    self.prefFontPop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(120, 215, 230, 26) pullsDown:NO];
+    self.prefFontPop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(120, 249, 230, 26) pullsDown:NO];
     [self.prefFontPop addItemsWithTitles:@[@"Menlo", @"Monaco", @"Courier", @"Courier New"]];
     [self.prefFontPop selectItemWithTitle:[self currentFontName]];
     [cv addSubview:self.prefFontPop];
 
     // Font size
-    NSTextField *lblSize = [[NSTextField alloc] initWithFrame:NSMakeRect(24, 180, 90, 20)];
+    NSTextField *lblSize = [[NSTextField alloc] initWithFrame:NSMakeRect(24, 214, 90, 20)];
     lblSize.stringValue = @"Font Size:";
     lblSize.editable = NO; lblSize.bezeled = NO; lblSize.drawsBackground = NO;
     [cv addSubview:lblSize];
 
-    self.prefSizePop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(120, 177, 100, 26) pullsDown:NO];
+    self.prefSizePop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(120, 211, 100, 26) pullsDown:NO];
     for (NSString *s in @[@"9", @"10", @"11", @"12", @"13", @"14", @"16", @"18", @"20", @"24"]) {
         [self.prefSizePop addItemWithTitle:s];
     }
@@ -1247,12 +1251,12 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     [cv addSubview:self.prefSizePop];
 
     // Tab Width
-    NSTextField *lblTab = [[NSTextField alloc] initWithFrame:NSMakeRect(24, 142, 90, 20)];
+    NSTextField *lblTab = [[NSTextField alloc] initWithFrame:NSMakeRect(24, 176, 90, 20)];
     lblTab.stringValue = @"Tab Width:";
     lblTab.editable = NO; lblTab.bezeled = NO; lblTab.drawsBackground = NO;
     [cv addSubview:lblTab];
 
-    self.prefTabPop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(120, 139, 100, 26) pullsDown:NO];
+    self.prefTabPop = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(120, 173, 100, 26) pullsDown:NO];
     [self.prefTabPop addItemsWithTitles:@[@"2", @"4", @"8"]];
     [self.prefTabPop selectItemWithTitle:[NSString stringWithFormat:@"%ld", (long)[self currentTabWidth]]];
     [cv addSubview:self.prefTabPop];
@@ -1260,21 +1264,27 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     // Checkboxes
     self.prefSpacesCheck = [NSButton checkboxWithTitle:@"Use spaces instead of tabs (soft tabs)"
                                                 target:nil action:nil];
-    self.prefSpacesCheck.frame = NSMakeRect(24, 106, 300, 22);
+    self.prefSpacesCheck.frame = NSMakeRect(24, 140, 300, 22);
     self.prefSpacesCheck.state = [self currentUseSpaces] ? NSControlStateValueOn : NSControlStateValueOff;
     [cv addSubview:self.prefSpacesCheck];
 
     self.prefLineNumCheck = [NSButton checkboxWithTitle:@"Display line numbers margin"
                                                  target:nil action:nil];
-    self.prefLineNumCheck.frame = NSMakeRect(24, 80, 300, 22);
+    self.prefLineNumCheck.frame = NSMakeRect(24, 114, 300, 22);
     self.prefLineNumCheck.state = [self currentShowLineNumbers] ? NSControlStateValueOn : NSControlStateValueOff;
     [cv addSubview:self.prefLineNumCheck];
 
     self.prefWrapCheck = [NSButton checkboxWithTitle:@"Enable word wrap by default"
                                               target:nil action:nil];
-    self.prefWrapCheck.frame = NSMakeRect(24, 54, 300, 22);
+    self.prefWrapCheck.frame = NSMakeRect(24, 88, 300, 22);
     self.prefWrapCheck.state = [self currentWordWrap] ? NSControlStateValueOn : NSControlStateValueOff;
     [cv addSubview:self.prefWrapCheck];
+
+    self.prefAutoUpdateCheck = [NSButton checkboxWithTitle:@"Automatically check for updates in background"
+                                                    target:nil action:nil];
+    self.prefAutoUpdateCheck.frame = NSMakeRect(24, 58, 320, 22);
+    self.prefAutoUpdateCheck.state = [AutoUpdater sharedUpdater].autoUpdateEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    [cv addSubview:self.prefAutoUpdateCheck];
 
     // Apply Button
     NSButton *applyBtn = [[NSButton alloc] initWithFrame:NSMakeRect(250, 16, 105, 30)];
@@ -1301,6 +1311,10 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     BOOL spaces = (self.prefSpacesCheck.state == NSControlStateValueOn);
     BOOL lines = (self.prefLineNumCheck.state == NSControlStateValueOn);
     BOOL wrap = (self.prefWrapCheck.state == NSControlStateValueOn);
+    BOOL autoUpdate = (self.prefAutoUpdateCheck.state == NSControlStateValueOn);
+
+    [AutoUpdater sharedUpdater].autoUpdateEnabled = autoUpdate;
+    self.autoUpdateToggleMenuItem.state = autoUpdate ? NSControlStateValueOn : NSControlStateValueOff;
 
     [self setTestPreferenceFont:font size:sz tabWidth:tab useSpaces:spaces wordWrap:wrap lineNumbers:lines];
     if (self.prefsWindow) {
@@ -1683,7 +1697,15 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     // Pin header and footer bars dynamically
     self.toolbar.frame = NSMakeRect(0, totalH - kToolbarH, totalW, kToolbarH);
     self.tabStrip.frame = NSMakeRect(0, totalH - kToolbarH - kTabH, totalW, kTabH);
-    self.status.frame = NSMakeRect(0, 0, totalW, self.bodyBottom);
+    if (self.bottomRestartButton && !self.bottomRestartButton.hidden) {
+        CGFloat btnW = 215.0;
+        CGFloat dismissW = 22.0;
+        self.bottomRestartButton.frame = NSMakeRect(totalW - btnW - dismissW - 6, 1, btnW, 20);
+        self.bottomDismissUpdateButton.frame = NSMakeRect(totalW - dismissW - 4, 1, dismissW, 20);
+        self.status.frame = NSMakeRect(0, 0, totalW - btnW - dismissW - 12, self.bodyBottom);
+    } else {
+        self.status.frame = NSMakeRect(0, 0, totalW, self.bodyBottom);
+    }
 
     BOOL shown = self.sidebar.superview != nil;
     CGFloat sbW = shown ? self.sidebarWidth : 0;
@@ -2505,9 +2527,41 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     }
 }
 
+- (void)bottomRestartAction:(id)sender {
+    (void)sender;
+    [self saveSession];
+    [[AutoUpdater sharedUpdater] relaunchAndInstallUpdate];
+}
+
+- (void)dismissBottomUpdateBanner:(id)sender {
+    (void)sender;
+    self.bottomRestartButton.hidden = YES;
+    self.bottomDismissUpdateButton.hidden = YES;
+    [self relayoutBody];
+    [self flashStatus:@"Update postponed. You can restart anytime from the Help menu."];
+}
+
+- (void)toggleAutoUpdateAction:(id)sender {
+    (void)sender;
+    AutoUpdater *u = [AutoUpdater sharedUpdater];
+    u.autoUpdateEnabled = !u.autoUpdateEnabled;
+    self.autoUpdateToggleMenuItem.state = u.autoUpdateEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    if (self.prefAutoUpdateCheck) {
+        self.prefAutoUpdateCheck.state = u.autoUpdateEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    [self flashStatus:u.autoUpdateEnabled ? @"Automatic updates enabled" : @"Automatic updates disabled"];
+}
+
 - (void)autoUpdater:(AutoUpdater *)updater didChangeStatus:(AutoUpdateStatus)status {
     if (status == AutoUpdateStatusDownloading) {
         [self flashStatus:[NSString stringWithFormat:@"Downloading Catatan++ v%@ in background…", updater.latestVersion]];
+        self.bottomRestartButton.title = [NSString stringWithFormat:@"Downloading v%@…", updater.latestVersion];
+        self.bottomRestartButton.enabled = NO;
+        self.bottomRestartButton.hidden = NO;
+        self.bottomDismissUpdateButton.hidden = YES;
+        [self relayoutBody];
+    } else if (status == AutoUpdateStatusReadyToInstall) {
+        self.bottomRestartButton.enabled = YES;
     }
 }
 
@@ -2515,8 +2569,8 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     (void)sender;
     NSDictionary *options = @{
         NSAboutPanelOptionApplicationName: @"Catatan++",
-        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.1",
-        NSAboutPanelOptionVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"2",
+        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.2",
+        NSAboutPanelOptionVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"3",
         @"Copyright": @"© 2026 Anggun Indra & Upstream Notepad++ Contributors"
     };
     [NSApp orderFrontStandardAboutPanelWithOptions:options];
@@ -2526,7 +2580,15 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     NSString *title = [NSString stringWithFormat:@"⟳ Restart to Update (v%@)", updater.latestVersion];
     self.updateMenuItem.title = title;
     self.helpUpdateMenuItem.title = title;
-    [self flashStatus:[NSString stringWithFormat:@"Update ready: v%@. Click menu to restart and apply.", updater.latestVersion]];
+
+    // Show prominent bottom restart button
+    self.bottomRestartButton.title = title;
+    self.bottomRestartButton.enabled = YES;
+    self.bottomRestartButton.hidden = NO;
+    self.bottomDismissUpdateButton.hidden = NO;
+    [self relayoutBody];
+
+    [self flashStatus:[NSString stringWithFormat:@"Update ready: v%@. Click Restart button below to apply.", updater.latestVersion]];
 }
 
 #pragma mark Menu
@@ -2749,6 +2811,14 @@ static NSMutableArray<NSString *> *gLangOrder;
                                                   keyEquivalent:@""];
     self.helpUpdateMenuItem.target = self;
     [helpMenu addItem:self.helpUpdateMenuItem];
+    [helpMenu addItem:[NSMenuItem separatorItem]];
+
+    self.autoUpdateToggleMenuItem = [[NSMenuItem alloc] initWithTitle:@"Automatically Check for Updates"
+                                                               action:@selector(toggleAutoUpdateAction:)
+                                                        keyEquivalent:@""];
+    self.autoUpdateToggleMenuItem.target = self;
+    self.autoUpdateToggleMenuItem.state = [AutoUpdater sharedUpdater].autoUpdateEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    [helpMenu addItem:self.autoUpdateToggleMenuItem];
 
     helpItem.submenu = helpMenu;
     [bar addItem:helpItem];
@@ -2825,6 +2895,23 @@ static NSMutableArray<NSString *> *gLangOrder;
     self.status.stringValue = @"";
     self.status.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
     [content addSubview:self.status];
+
+    self.bottomRestartButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 0, 0)];
+    self.bottomRestartButton.bezelStyle = NSBezelStyleInline;
+    self.bottomRestartButton.target = self;
+    self.bottomRestartButton.action = @selector(bottomRestartAction:);
+    self.bottomRestartButton.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    self.bottomRestartButton.hidden = YES;
+    [content addSubview:self.bottomRestartButton positioned:NSWindowAbove relativeTo:self.status];
+
+    self.bottomDismissUpdateButton = [[NSButton alloc] initWithFrame:NSMakeRect(0, 0, 0, 0)];
+    self.bottomDismissUpdateButton.bezelStyle = NSBezelStyleInline;
+    self.bottomDismissUpdateButton.title = @"✕";
+    self.bottomDismissUpdateButton.target = self;
+    self.bottomDismissUpdateButton.action = @selector(dismissBottomUpdateBanner:);
+    self.bottomDismissUpdateButton.font = [NSFont systemFontOfSize:10 weight:NSFontWeightBold];
+    self.bottomDismissUpdateButton.hidden = YES;
+    [content addSubview:self.bottomDismissUpdateButton positioned:NSWindowAbove relativeTo:self.status];
 
     self.window.contentView = content;
 }
@@ -4271,9 +4358,22 @@ static NSMutableArray<NSString *> *gLangOrder;
         BOOL updaterOK = (u != nil) && [u.repoOwner isEqualToString:@"anggun-indra"] && [u.repoName isEqualToString:@"catatan-plus-plus"];
         BOOL menuOK = (self.updateMenuItem != nil) && [self.updateMenuItem.title containsString:@"Update"];
         BOOL helpMenuOK = (self.helpUpdateMenuItem != nil) && [self.helpUpdateMenuItem.title containsString:@"Update"];
-        printf("%s auto updater repo=%s/%s menuBound=%d helpMenuBound=%d\n",
-               (updaterOK && menuOK && helpMenuOK) ? "OK  " : "FAIL", [u.repoOwner UTF8String], [u.repoName UTF8String], menuOK, helpMenuOK);
-        if (!updaterOK || !menuOK || !helpMenuOK) failures++;
+        BOOL toggleMenuOK = (self.autoUpdateToggleMenuItem != nil);
+        BOOL bottomBtnsOK = (self.bottomRestartButton != nil) && (self.bottomDismissUpdateButton != nil);
+
+        // Test autoUpdateEnabled toggle
+        BOOL originalSetting = u.autoUpdateEnabled;
+        u.autoUpdateEnabled = NO;
+        BOOL toggledOff = (u.autoUpdateEnabled == NO);
+        u.autoUpdateEnabled = YES;
+        BOOL toggledOn = (u.autoUpdateEnabled == YES);
+        u.autoUpdateEnabled = originalSetting;
+        BOOL toggleWorking = toggledOff && toggledOn;
+
+        printf("%s auto updater repo=%s/%s menuBound=%d helpMenuBound=%d toggleMenu=%d bottomUI=%d toggleSetting=%d\n",
+               (updaterOK && menuOK && helpMenuOK && toggleMenuOK && bottomBtnsOK && toggleWorking) ? "OK  " : "FAIL",
+               [u.repoOwner UTF8String], [u.repoName UTF8String], menuOK, helpMenuOK, toggleMenuOK, bottomBtnsOK, toggleWorking);
+        if (!updaterOK || !menuOK || !helpMenuOK || !toggleMenuOK || !bottomBtnsOK || !toggleWorking) failures++;
     }
 
     printf("SELFTEST_DONE failures=%d\n", failures);

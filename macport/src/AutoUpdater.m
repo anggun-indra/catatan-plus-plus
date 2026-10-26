@@ -27,8 +27,16 @@
         _status = AutoUpdateStatusIdle;
         _repoOwner = @"anggun-indra";
         _repoName = @"catatan-plus-plus";
+        id pref = [[NSUserDefaults standardUserDefaults] objectForKey:@"AutoUpdateEnabled"];
+        _autoUpdateEnabled = (pref != nil) ? [pref boolValue] : YES;
     }
     return self;
+}
+
+- (void)setAutoUpdateEnabled:(BOOL)enabled {
+    _autoUpdateEnabled = enabled;
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"AutoUpdateEnabled"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 + (NSComparisonResult)compareVersion:(NSString *)vA toVersion:(NSString *)vB {
@@ -56,6 +64,10 @@
 }
 
 - (void)checkForUpdatesManual:(BOOL)isManual {
+    if (!isManual && !self.autoUpdateEnabled) {
+        return;
+    }
+
     if (self.status == AutoUpdateStatusChecking || self.status == AutoUpdateStatusDownloading) {
         if (isManual) {
             NSAlert *alert = [NSAlert new];

@@ -30,6 +30,7 @@ typedef NS_ENUM(NSInteger, AutoUpdateStatus) {
 @property (nonatomic, readonly, copy) NSString *stagedAppPath;
 @property (nonatomic, copy) NSString *repoOwner;
 @property (nonatomic, copy) NSString *repoName;
+@property (nonatomic, assign) BOOL autoUpdateEnabled;
 
 + (instancetype)sharedUpdater;
 
