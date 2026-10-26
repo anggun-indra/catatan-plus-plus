@@ -291,34 +291,90 @@ body {
 
 .showcase-header {
   display: flex;
-  justify-content: center;
-  margin-bottom: 20px;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.showcase-nav-title {
+  text-align: center;
+}
+
+.showcase-nav-title h3 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.showcase-nav-title p {
+  font-size: 0.9rem;
+  color: var(--text-muted);
 }
 
 .showcase-tabs {
-  display: inline-flex;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   background: var(--bg-surface);
-  padding: 4px;
+  padding: 6px;
   border-radius: var(--radius-full);
   border: 1px solid var(--border-subtle);
+  gap: 6px;
+  max-width: 100%;
 }
 
 .tab-btn {
   background: transparent;
-  border: none;
+  border: 1px solid transparent;
   color: var(--text-secondary);
-  padding: 8px 20px;
+  padding: 8px 16px;
   border-radius: var(--radius-full);
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
   transition: all 0.2s ease;
 }
 
+.tab-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
 .tab-btn.active {
-  background: var(--accent-green);
-  color: #ffffff;
-  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.4);
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--accent-green);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.25);
+}
+
+.tab-pill {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pill-mermaid {
+  background: rgba(16, 185, 129, 0.25);
+  color: #10b981;
+}
+
+.pill-plantuml {
+  background: rgba(139, 92, 246, 0.25);
+  color: #a78bfa;
+}
+
+.pill-markdown {
+  background: rgba(59, 130, 246, 0.25);
+  color: #60a5fa;
 }
 
 .window-mockup {
@@ -432,9 +488,34 @@ body {
   background: linear-gradient(180deg, rgba(16, 185, 129, 0.06) 0%, var(--bg-card) 100%);
 }
 
-.card-icon {
-  font-size: 2rem;
-  margin-bottom: 16px;
+.solar-icon-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-subtle);
+  margin-bottom: 20px;
+  color: var(--accent-green);
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.bento-card:hover .solar-icon-wrap {
+  transform: scale(1.08);
+}
+
+.solar-icon-wrap.accent-emerald {
+  background: var(--accent-glow);
+  border-color: rgba(16, 185, 129, 0.3);
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.25);
+}
+
+.solar-icon {
+  width: 26px;
+  height: 26px;
+  display: block;
 }
 
 .bento-card h3 {
@@ -447,6 +528,42 @@ body {
   color: var(--text-secondary);
   font-size: 0.95rem;
   line-height: 1.6;
+}
+
+.feature-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.feature-tag {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+}
+
+.card-highlight .feature-tag {
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--accent-green);
+  border-color: rgba(16, 185, 129, 0.25);
+}
+
+.footer-solar-credit {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 8px;
+  line-height: 1.5;
+}
+
+.footer-solar-credit a {
+  color: var(--text-secondary);
+  text-decoration: underline;
 }
 
 /* Install Guide */
@@ -687,5 +804,12 @@ body {
   }
   .footer-container {
     flex-direction: column;
+  }
+  .showcase-tabs {
+    justify-content: flex-start;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    padding: 6px;
+    -webkit-overflow-scrolling: touch;
   }
 }

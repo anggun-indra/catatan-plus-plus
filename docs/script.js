@@ -3,6 +3,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 1. Interactive Screenshot Switcher
   const tabs = document.querySelectorAll('.tab-btn');
   const showcaseImg = document.getElementById('showcaseImg');
+  const windowTitleText = document.getElementById('windowTitleText');
 
   if (tabs.length && showcaseImg) {
     tabs.forEach(tab => {
@@ -11,6 +12,10 @@ document.addEventListener('DOMContentLoaded', () => {
         tab.classList.add('active');
 
         const target = tab.getAttribute('data-target');
+        const title = tab.getAttribute('data-title');
+        if (title && windowTitleText) {
+          windowTitleText.textContent = title;
+        }
         if (target) {
           showcaseImg.style.opacity = '0.3';
           setTimeout(() => {
