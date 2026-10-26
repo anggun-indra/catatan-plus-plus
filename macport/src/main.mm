@@ -2569,8 +2569,8 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     (void)sender;
     NSDictionary *options = @{
         NSAboutPanelOptionApplicationName: @"Catatan++",
-        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.2",
-        NSAboutPanelOptionVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"3",
+        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.3",
+        NSAboutPanelOptionVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"4",
         @"Copyright": @"© 2026 Anggun Indra & Upstream Notepad++ Contributors"
     };
     [NSApp orderFrontStandardAboutPanelWithOptions:options];
@@ -2822,7 +2822,10 @@ static NSMutableArray<NSString *> *gLangOrder;
 
     helpItem.submenu = helpMenu;
     [bar addItem:helpItem];
-    [NSApp setHelpMenu:helpMenu];
+
+    // Divert system Help Search field to an unattached dummy menu so the visible Help menu has no search bar
+    NSMenu *dummyHelpMenu = [[NSMenu alloc] initWithTitle:@""];
+    [NSApp setHelpMenu:dummyHelpMenu];
 
     NSApp.mainMenu = bar;
 }
