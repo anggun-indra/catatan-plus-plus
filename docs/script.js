@@ -90,4 +90,27 @@ document.addEventListener('DOMContentLoaded', () => {
       if (matrixDmgBtn) matrixDmgBtn.href = fallbackDmgURL;
       if (matrixZipBtn) matrixZipBtn.href = fallbackZipURL;
     });
+
+  // 3. Command Copy Helpers (Homebrew & Gatekeeper)
+  function setupCopyButton(btnId, textToCopy) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(textToCopy);
+        const originalHTML = btn.innerHTML;
+        btn.classList.add('copied');
+        btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg><span>Copied!</span>`;
+        setTimeout(() => {
+          btn.classList.remove('copied');
+          btn.innerHTML = originalHTML;
+        }, 2000);
+      } catch (e) {
+        console.warn('Clipboard copy failed:', e);
+      }
+    });
+  }
+
+  setupCopyButton('copyBrewBtn', 'brew install --cask anggun-indra/tap/catatan-plus-plus');
+  setupCopyButton('copyXattrBtn', 'xattr -cr /Applications/Catatan++.app');
 });

@@ -46,6 +46,46 @@ Menghasilkan aplikasi mandiri `Catatan++.app` berukuran ramping (~4.0 MB) dengan
 
 ---
 
+## 🚀 Cara Install di macOS
+
+### Pilihan 1: Via Homebrew Cask (Direkomendasikan)
+Cara termudah dan paling bersih untuk pengguna Mac:
+```bash
+brew install --cask anggun-indra/tap/catatan-plus-plus
+```
+Untuk memperbarui di kemudian hari:
+```bash
+brew upgrade --cask catatan-plus-plus
+```
+
+### Pilihan 2: Download Manual (.dmg / .zip)
+1. Unduh installer disk image (`Catatan++-macOS-arm64.dmg`) dari [Halaman Rilis GitHub](https://github.com/anggun-indra/catatan-plus-plus/releases/latest) atau situs web kami di [anggun-indra.github.io/catatan-plus-plus](https://anggun-indra.github.io/catatan-plus-plus/).
+2. Buka file `.dmg` dan geser ikon **Catatan++** ke folder `/Applications`.
+
+---
+
+### 🛡️ Catatan Keamanan macOS (Apple Gatekeeper)
+
+> **Catatan untuk Pengguna macOS:**  
+> **Catatan++** adalah perangkat lunak open-source gratis dan independen. Kami sengaja **tidak membeli sertifikat tahunan Apple Developer ($99/tahun)** agar proyek ini tetap gratis dan mandiri.
+>
+> Saat pertama kali dibuka setelah diunduh dari internet, macOS akan menampilkan peringatan keamanan:  
+> *"Apple could not verify 'catatan++' is free of malware..."* atau *"Not Opened"*.
+>
+> **Cara Mengatasinya (Cukup Sekali Saja):**
+> 
+> **Cara Cepat (Terminal):**
+> ```bash
+> xattr -cr /Applications/Catatan++.app
+> ```
+> 
+> **Cara Visual (Finder / Pengaturan):**
+> 1. Buka folder `/Applications`.
+> 2. Tahan tombol **Control**, **klik kanan** pada `Catatan++`, lalu klik **Open**.
+> 3. Atau buka **System Settings** &rarr; **Privacy & Security** &rarr; scroll ke bawah dan klik tombol **Open Anyway**.
+
+---
+
 ## 🏗️ Cara Build dari Source
 
 ### Kebutuhan Sistem

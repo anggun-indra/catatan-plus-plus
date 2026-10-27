@@ -247,12 +247,31 @@
         <img src="assets/logo.svg" alt="Catatan++ Mascot" class="download-mascot" width="68" height="68">
         <h2>Download Catatan++ for macOS</h2>
         <p>Free, open source, and built specifically for Apple Silicon M1, M2, M3, and M4.</p>
+
+        <!-- Homebrew Installation Option -->
+        <div class="brew-install-box">
+          <div class="brew-header">
+            <span class="brew-label">
+              <span class="brew-icon">🍺</span>
+              <span>Install via Homebrew Cask</span>
+            </span>
+            <button class="copy-cmd-btn" id="copyBrewBtn" aria-label="Copy brew command">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <span>Copy</span>
+            </button>
+          </div>
+          <code class="brew-code">brew install --cask anggun-indra/tap/catatan-plus-plus</code>
+        </div>
         
+        <div class="download-divider">
+          <span>or download manual package</span>
+        </div>
+
         <div class="download-options">
           <a href="https://github.com/anggun-indra/catatan-plus-plus/releases/latest" id="matrixDmgBtn" class="download-btn-card">
             <div class="btn-card-left">
               <span class="btn-card-title">Disk Image (.dmg)</span>
-              <span class="btn-card-desc">Recommended for all macOS users • 3.6 MB</span>
+              <span class="btn-card-desc">Recommended for all macOS users • 3.8 MB</span>
             </div>
             <span class="btn-badge">Latest v1.0.3</span>
           </a>
@@ -260,10 +279,29 @@
           <a href="https://github.com/anggun-indra/catatan-plus-plus/releases/latest" id="matrixZipBtn" class="download-btn-card secondary">
             <div class="btn-card-left">
               <span class="btn-card-title">Archive (.zip)</span>
-              <span class="btn-card-desc">Portable app bundle • 2.8 MB</span>
+              <span class="btn-card-desc">Portable app bundle • 2.9 MB</span>
             </div>
             <span class="btn-badge secondary">Portable</span>
           </a>
+        </div>
+
+        <!-- macOS Gatekeeper Notice -->
+        <div class="gatekeeper-card">
+          <div class="gatekeeper-header">
+            <div class="gatekeeper-badge">🛡️ First-time Launch Notice</div>
+            <h4>Apple Gatekeeper / "Not Opened" Alert?</h4>
+            <p>Catatan++ is free open-source software built from source and not signed with a paid Apple Developer certificate ($99/year). If macOS displays an alert upon first launch, simply run this one-time command in Terminal:</p>
+          </div>
+          <div class="gatekeeper-cmd-wrap">
+            <code class="gatekeeper-code">xattr -cr /Applications/Catatan++.app</code>
+            <button class="copy-cmd-btn" id="copyXattrBtn" aria-label="Copy xattr command">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <span>Copy</span>
+            </button>
+          </div>
+          <div class="gatekeeper-alt">
+            <span>Or open <strong>Finder</strong> &rarr; right-click <code>Catatan++.app</code> in <code>/Applications</code> &rarr; select <strong>Open</strong> &rarr; click <strong>Open</strong>.</span>
+          </div>
         </div>
 
         <div class="download-system-req">

@@ -706,6 +706,166 @@ body {
   color: var(--text-secondary);
 }
 
+/* Homebrew & Gatekeeper Additions */
+.brew-install-box {
+  background: rgba(13, 17, 23, 0.9);
+  border: 1px solid rgba(46, 204, 113, 0.3);
+  border-radius: var(--radius-md);
+  padding: 16px 20px;
+  max-width: 640px;
+  margin: 0 auto 24px;
+  text-align: left;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+}
+
+.brew-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.brew-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.brew-icon {
+  font-size: 1.1rem;
+}
+
+.brew-code, .gatekeeper-code {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.9rem;
+  color: #a7f3d0;
+  background: rgba(0, 0, 0, 0.4);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.download-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  max-width: 640px;
+  margin: 0 auto 24px;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.download-divider::before,
+.download-divider::after {
+  content: "";
+  flex: 1;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.download-divider span {
+  padding: 0 16px;
+}
+
+/* Gatekeeper Notice Card */
+.gatekeeper-card {
+  background: rgba(22, 27, 34, 0.85);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--radius-md);
+  padding: 24px;
+  max-width: 640px;
+  margin: 28px auto 28px;
+  text-align: left;
+}
+
+.gatekeeper-header {
+  margin-bottom: 14px;
+}
+
+.gatekeeper-badge {
+  display: inline-block;
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  margin-bottom: 8px;
+}
+
+.gatekeeper-header h4 {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.gatekeeper-header p {
+  font-size: 0.875rem !important;
+  color: var(--text-secondary) !important;
+  line-height: 1.5;
+  margin-bottom: 0 !important;
+}
+
+.gatekeeper-cmd-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.gatekeeper-cmd-wrap .gatekeeper-code {
+  flex: 1;
+}
+
+.gatekeeper-alt {
+  font-size: 0.825rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.gatekeeper-alt code {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+
+.copy-cmd-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.copy-cmd-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: var(--border-focus);
+}
+
+.copy-cmd-btn.copied {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border-color: #10b981;
+}
+
 .download-system-req {
   font-size: 0.85rem;
   color: var(--text-muted);
