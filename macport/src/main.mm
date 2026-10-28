@@ -240,6 +240,7 @@ static const CGFloat kCloseSize = 16.0;
 
 @interface EditorDocument : NSObject
 @property (nonatomic, copy) NSString *path;
+@property (nonatomic, copy) NSString *untitledName;
 @property (nonatomic, copy) NSString *lang;
 @property (nonatomic) BOOL dirty;
 @property (nonatomic, strong) ScintillaView *editor;
@@ -255,7 +256,10 @@ static const CGFloat kCloseSize = 16.0;
     [_undoBreakTimer invalidate];
 }
 - (NSString *)displayName {
-    return self.path ? self.path.lastPathComponent : @"untitled";
+    if (self.path && self.path.length > 0) {
+        return self.path.lastPathComponent;
+    }
+    return self.untitledName.length > 0 ? self.untitledName : @"new 1";
 }
 @end
 
@@ -327,6 +331,11 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
 @property (nonatomic, strong) NSButton *prefSpacesCheck;
 @property (nonatomic, strong) NSButton *prefLineNumCheck;
 @property (nonatomic, strong) NSButton *prefWrapCheck;
+
+// Open Recent & Session
+@property (nonatomic, strong) NSMenu *recentMenu;
+@property (nonatomic, strong) NSTimer *sessionAutosaveTimer;
+@property (nonatomic) BOOL isRestoringSession;
 @end
 
 @implementation AppDelegate
@@ -498,9 +507,28 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
 
 #pragma mark Documents
 
+- (NSString *)nextUntitledName {
+    NSInteger i = 1;
+    while (YES) {
+        NSString *candidate = [NSString stringWithFormat:@"new %ld", (long)i];
+        BOOL exists = NO;
+        for (EditorDocument *doc in self.documents) {
+            if (doc.path == nil && [doc.displayName isEqualToString:candidate]) {
+                exists = YES;
+                break;
+            }
+        }
+        if (!exists) return candidate;
+        i++;
+    }
+}
+
 - (EditorDocument *)makeDocumentWithPath:(NSString *)path text:(NSString *)text lang:(NSString *)lang {
     EditorDocument *doc = [EditorDocument new];
     doc.path = path;
+    if (path == nil || path.length == 0) {
+        doc.untitledName = [self nextUntitledName];
+    }
     doc.lang = lang ?: @"normal";
     doc.dirty = NO;
     doc.editor = [self makeEditor];
@@ -525,6 +553,9 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
 - (void)addDocument:(EditorDocument *)doc {
     [self.documents addObject:doc];
     [self showDocumentAtIndex:(NSInteger)self.documents.count - 1];
+    if (!self.isRestoringSession) {
+        [self saveSession];
+    }
 }
 
 - (void)newDocument {
@@ -570,6 +601,9 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
                                                 lang:NppLanguageForExtension(path.pathExtension)];
     [doc.editor setGeneralProperty:SCI_GOTOPOS parameter:0 value:0];
     [self addDocument:doc];
+    if (!self.isRestoringSession) {
+        [self addRecentDocument:path];
+    }
     [self updateUI];
 }
 
@@ -622,6 +656,7 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     if (self.documents.count == 0) {
         self.activeIndex = -1;
         [self updateUI];
+        [self saveSession];
         [self.window performClose:nil];
         return;
     }
@@ -634,6 +669,7 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
         self.tabStrip.selectedIndex = self.activeIndex;
         [self updateUI];
     }
+    [self saveSession];
 }
 
 - (BOOL)confirmDiscard:(EditorDocument *)doc {
@@ -658,7 +694,7 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     NSString *path = doc.path;
     if (!path || saveAs) {
         NSSavePanel *panel = [NSSavePanel savePanel];
-        panel.nameFieldStringValue = path ? path.lastPathComponent : @"untitled.txt";
+        panel.nameFieldStringValue = path ? path.lastPathComponent : [NSString stringWithFormat:@"%@.txt", doc.displayName];
         if ([panel runModal] != NSModalResponseOK) return NO;
         path = panel.URL.path;
     }
@@ -673,10 +709,13 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     }
 
     doc.path = path;
+    doc.untitledName = nil;
     doc.dirty = NO;
     [doc.editor setGeneralProperty:SCI_SETSAVEPOINT parameter:0 value:0];
     [self applyLanguage:NppLanguageForExtension(path.pathExtension) toDocument:doc];
+    [self addRecentDocument:path];
     [self updateUI];
+    [self saveSession];
     return YES;
 }
 
@@ -1322,7 +1361,95 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     }
 }
 
-#pragma mark - Session Restoration
+#pragma mark - Recent Documents
+
+- (void)addRecentDocument:(NSString *)path {
+    if (!path || path.length == 0) return;
+
+    // Register with system NSDocumentController (for macOS Dock menu recents)
+    NSURL *url = [NSURL fileURLWithPath:path];
+    [[NSDocumentController sharedDocumentController] noteNewRecentDocumentURL:url];
+
+    // Maintain persistent list in NSUserDefaults
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSMutableArray *recents = [[defaults objectForKey:@"CatatanRecentDocuments"] mutableCopy] ?: [NSMutableArray array];
+
+    [recents removeObject:path];
+    [recents insertObject:path atIndex:0];
+
+    while (recents.count > 15) {
+        [recents removeLastObject];
+    }
+
+    [defaults setObject:recents forKey:@"CatatanRecentDocuments"];
+    [self updateRecentMenu];
+}
+
+- (void)updateRecentMenu {
+    if (!self.recentMenu) return;
+    [self.recentMenu removeAllItems];
+
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSArray *recents = [defaults objectForKey:@"CatatanRecentDocuments"];
+
+    if (!recents || recents.count == 0) {
+        NSMenuItem *noneItem = [[NSMenuItem alloc] initWithTitle:@"No Recent Files" action:nil keyEquivalent:@""];
+        noneItem.enabled = NO;
+        [self.recentMenu addItem:noneItem];
+        return;
+    }
+
+    for (NSString *path in recents) {
+        NSString *name = path.lastPathComponent;
+        NSString *dir = path.stringByDeletingLastPathComponent;
+        NSString *displayTitle;
+        if (dir.length > 40) {
+            displayTitle = [NSString stringWithFormat:@"%@  —  …%@", name, [dir substringFromIndex:dir.length - 37]];
+        } else {
+            displayTitle = [NSString stringWithFormat:@"%@  —  %@", name, dir];
+        }
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:displayTitle action:@selector(openRecentDocument:) keyEquivalent:@""];
+        item.target = self;
+        item.representedObject = path;
+        item.toolTip = path;
+        [self.recentMenu addItem:item];
+    }
+
+    [self.recentMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *clearItem = [[NSMenuItem alloc] initWithTitle:@"Clear Menu" action:@selector(clearRecentDocuments:) keyEquivalent:@""];
+    clearItem.target = self;
+    [self.recentMenu addItem:clearItem];
+}
+
+- (void)openRecentDocument:(NSMenuItem *)sender {
+    NSString *path = sender.representedObject;
+    if (!path) return;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"File Not Found";
+        alert.informativeText = [NSString stringWithFormat:@"The file “%@” no longer exists.", path];
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+        NSMutableArray *recents = [[defaults objectForKey:@"CatatanRecentDocuments"] mutableCopy];
+        [recents removeObject:path];
+        [defaults setObject:recents forKey:@"CatatanRecentDocuments"];
+        [self updateRecentMenu];
+        return;
+    }
+    [self openDocument:path];
+}
+
+- (void)clearRecentDocuments:(id)sender {
+    (void)sender;
+    [[NSDocumentController sharedDocumentController] clearRecentDocuments:nil];
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    [defaults removeObjectForKey:@"CatatanRecentDocuments"];
+    [self updateRecentMenu];
+}
+
+#pragma mark - Session Restoration & Backup
 
 - (NSString *)sessionFilePath {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
@@ -1332,19 +1459,76 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     return [appDir stringByAppendingPathComponent:@"session.plist"];
 }
 
+- (NSString *)sessionBackupDirectory {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
+    NSString *base = paths.firstObject ?: NSTemporaryDirectory();
+    NSString *backupDir = [base stringByAppendingPathComponent:@"Catatan++/backup"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:backupDir withIntermediateDirectories:YES attributes:nil error:NULL];
+    return backupDir;
+}
+
 - (void)saveSession {
+    if (self.isRestoringSession) return;
+
+    NSString *backupDir = [self sessionBackupDirectory];
+    NSFileManager *fm = [NSFileManager defaultManager];
     NSMutableArray *docs = [NSMutableArray array];
-    for (EditorDocument *doc in self.documents) {
-        if (doc.path.length > 0) {
-            long pos = [doc.editor getGeneralProperty:SCI_GETCURRENTPOS parameter:0];
+    NSMutableSet *activeBackupFiles = [NSMutableSet set];
+
+    for (NSUInteger idx = 0; idx < self.documents.count; idx++) {
+        EditorDocument *doc = self.documents[idx];
+        long pos = [doc.editor getGeneralProperty:SCI_GETCURRENTPOS parameter:0];
+        NSString *lang = doc.lang ?: @"normal";
+        BOOL dirty = doc.dirty;
+
+        if (doc.path.length == 0) {
+            // Untitled document (e.g. new 1, new 2)
+            NSString *backupFileName = [NSString stringWithFormat:@"untitled_%lu.txt", (unsigned long)idx];
+            NSString *backupFilePath = [backupDir stringByAppendingPathComponent:backupFileName];
+            NSString *content = [doc.editor string] ?: @"";
+            [content writeToFile:backupFilePath atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+            [activeBackupFiles addObject:backupFileName];
+
             [docs addObject:@{
-                @"path": doc.path,
-                @"lang": doc.lang ?: @"normal",
+                @"isUntitled": @YES,
+                @"untitledName": doc.displayName ?: @"new 1",
+                @"backupFile": backupFileName,
+                @"lang": lang,
                 @"cursor": @(pos),
-                @"dirty": @(doc.dirty)
+                @"dirty": @(dirty || content.length > 0)
             }];
+        } else {
+            // Existing file on disk
+            NSMutableDictionary *docInfo = [@{
+                @"isUntitled": @NO,
+                @"path": doc.path,
+                @"lang": lang,
+                @"cursor": @(pos),
+                @"dirty": @(dirty)
+            } mutableCopy];
+
+            if (dirty) {
+                // Modified file with unsaved buffer
+                NSString *backupFileName = [NSString stringWithFormat:@"modified_%lu.txt", (unsigned long)idx];
+                NSString *backupFilePath = [backupDir stringByAppendingPathComponent:backupFileName];
+                NSString *content = [doc.editor string] ?: @"";
+                [content writeToFile:backupFilePath atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+                [activeBackupFiles addObject:backupFileName];
+                docInfo[@"backupFile"] = backupFileName;
+            }
+
+            [docs addObject:docInfo];
         }
     }
+
+    // Clean up any stale backup files in backupDir that aren't in activeBackupFiles
+    NSArray *existingFiles = [fm contentsOfDirectoryAtPath:backupDir error:NULL];
+    for (NSString *fname in existingFiles) {
+        if (![activeBackupFiles containsObject:fname]) {
+            [fm removeItemAtPath:[backupDir stringByAppendingPathComponent:fname] error:NULL];
+        }
+    }
+
     NSDictionary *dict = @{
         @"documents": docs,
         @"activeIndex": @(self.activeIndex)
@@ -1354,32 +1538,80 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
 
 - (BOOL)restoreSession {
     NSString *path = [self sessionFilePath];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return NO;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:path]) return NO;
     NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:path];
     if (!dict) return NO;
     NSArray *docs = dict[@"documents"];
     if (!docs || docs.count == 0) return NO;
 
+    self.isRestoringSession = YES;
+    NSString *backupDir = [self sessionBackupDirectory];
     NSInteger savedActive = [dict[@"activeIndex"] integerValue];
     NSInteger restoredCount = 0;
+
     for (NSDictionary *info in docs) {
-        NSString *filePath = info[@"path"];
-        if (filePath && [[NSFileManager defaultManager] fileExistsAtPath:filePath]) {
-            [self openDocument:filePath];
-            EditorDocument *doc = [self.documents lastObject];
-            long pos = [info[@"cursor"] longValue];
+        BOOL isUntitled = [info[@"isUntitled"] boolValue];
+        NSString *lang = info[@"lang"] ?: @"normal";
+        long pos = [info[@"cursor"] longValue];
+        BOOL dirty = [info[@"dirty"] boolValue];
+
+        if (isUntitled) {
+            NSString *backupFile = info[@"backupFile"];
+            NSString *backupPath = backupFile ? [backupDir stringByAppendingPathComponent:backupFile] : nil;
+            NSString *text = @"";
+            if (backupPath && [fm fileExistsAtPath:backupPath]) {
+                text = [NSString stringWithContentsOfFile:backupPath encoding:NSUTF8StringEncoding error:NULL] ?: @"";
+            }
+            EditorDocument *doc = [self makeDocumentWithPath:nil text:text lang:lang];
+            if (info[@"untitledName"]) {
+                doc.untitledName = info[@"untitledName"];
+            }
             if (pos > 0) {
                 [doc.editor setGeneralProperty:SCI_GOTOPOS parameter:pos value:0];
             }
+            if (dirty || text.length > 0) {
+                doc.dirty = YES;
+            }
+            [self.documents addObject:doc];
             restoredCount++;
+        } else {
+            NSString *filePath = info[@"path"];
+            if (filePath && [fm fileExistsAtPath:filePath]) {
+                NSError *err = nil;
+                NSString *text = [NSString stringWithContentsOfFile:filePath encoding:NSUTF8StringEncoding error:&err];
+                if (!text) {
+                    text = [NSString stringWithContentsOfFile:filePath encoding:NSISOLatin1StringEncoding error:&err];
+                }
+                if (text) {
+                    EditorDocument *doc = [self makeDocumentWithPath:filePath text:text lang:NppLanguageForExtension(filePath.pathExtension)];
+                    NSString *backupFile = info[@"backupFile"];
+                    if (dirty && backupFile) {
+                        NSString *backupPath = [backupDir stringByAppendingPathComponent:backupFile];
+                        if ([fm fileExistsAtPath:backupPath]) {
+                            NSString *unsavedText = [NSString stringWithContentsOfFile:backupPath encoding:NSUTF8StringEncoding error:NULL];
+                            if (unsavedText) {
+                                [doc.editor setString:unsavedText];
+                                doc.dirty = YES;
+                            }
+                        }
+                    }
+                    if (pos > 0) {
+                        [doc.editor setGeneralProperty:SCI_GOTOPOS parameter:pos value:0];
+                    }
+                    [self.documents addObject:doc];
+                    restoredCount++;
+                }
+            }
         }
     }
+
+    self.isRestoringSession = NO;
+
     if (restoredCount > 0) {
-        if (savedActive >= 0 && savedActive < (NSInteger)self.documents.count) {
-            [self showDocumentAtIndex:savedActive];
-        } else {
-            [self showDocumentAtIndex:self.documents.count - 1];
-        }
+        NSInteger targetIndex = (savedActive >= 0 && savedActive < (NSInteger)self.documents.count) ? savedActive : (self.documents.count - 1);
+        [self showDocumentAtIndex:targetIndex];
+        [self updateUI];
         return YES;
     }
     return NO;
@@ -2638,6 +2870,14 @@ static NSMutableArray<NSString *> *gLangOrder;
     NSMenuItem *open = [[NSMenuItem alloc] initWithTitle:@"Open…" action:@selector(openFilePanel) keyEquivalent:@"o"];
     open.target = self;
     [fileMenu addItem:open];
+
+    // Open Recent Submenu
+    NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"Open Recent" action:nil keyEquivalent:@""];
+    self.recentMenu = [[NSMenu alloc] initWithTitle:@"Open Recent"];
+    recentItem.submenu = self.recentMenu;
+    [fileMenu addItem:recentItem];
+    [self updateRecentMenu];
+
     [fileMenu addItem:[NSMenuItem separatorItem]];
 
     NSMenuItem *save = [[NSMenuItem alloc] initWithTitle:@"Save" action:@selector(saveCurrent) keyEquivalent:@"s"];
@@ -2961,6 +3201,15 @@ static NSMutableArray<NSString *> *gLangOrder;
         [self newDocument];
     }
 
+    if (getenv("NPP_REPORT_RESTORED_TABS")) {
+        printf("RESTORED_TABS count=%lu active=%ld titles=",
+               (unsigned long)self.documents.count, (long)self.activeIndex);
+        for (EditorDocument *d in self.documents)
+            printf("[%s%s]", [d.displayName UTF8String], d.dirty ? " *" : "");
+        printf("\n");
+        exit(0);
+    }
+
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
     [self updateUI];
@@ -2970,10 +3219,41 @@ static NSMutableArray<NSString *> *gLangOrder;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [[AutoUpdater sharedUpdater] checkForUpdatesManual:NO];
         });
+
+        // Periodic background session snapshot every 5.0 seconds
+        __weak AppDelegate *weakSelf = self;
+        self.sessionAutosaveTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                                                                    repeats:YES
+                                                                      block:^(NSTimer * _Nonnull timer) {
+            (void)timer;
+            [weakSelf saveSession];
+        }];
     }
 }
 
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    if (sender == self.window) {
+        [self saveSession];
+    }
+    return YES;
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+    if (notification.object == self.window) {
+        [self saveSession];
+    }
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    [self.sessionAutosaveTimer invalidate];
+    self.sessionAutosaveTimer = nil;
+    [self saveSession];
+    return NSTerminateNow;
+}
+
 - (void)applicationWillTerminate:(NSNotification *)aNotification {
+    [self.sessionAutosaveTimer invalidate];
+    self.sessionAutosaveTimer = nil;
     [self saveSession];
 }
 
@@ -4120,12 +4400,12 @@ static NSMutableArray<NSString *> *gLangOrder;
         [self setTestPreferenceFont:@"Menlo" size:13 tabWidth:origTab useSpaces:YES wordWrap:NO lineNumbers:YES];
     }
 
-    printf("== session restoration ==\n");
+    printf("== session restoration & untitled/dirty snapshots ==\n");
     {
         NSString *sessPath = [self sessionFilePath];
         [[NSFileManager defaultManager] removeItemAtPath:sessPath error:NULL];
 
-        // Give doc a dummy path and save session
+        // 1. Basic path doc save
         EditorDocument *doc = [self activeDocument];
         NSString *origPath = doc.path;
         doc.path = @"/tmp/test_session_doc.txt";
@@ -4141,7 +4421,75 @@ static NSMutableArray<NSString *> *gLangOrder;
         if (!sessionOK) failures++;
 
         doc.path = origPath;
+
+        // 2. Test saving and restoring untitled documents with content & dirty state
+        [self resetDocuments];
+        [self newDocument]; // new 1
+        [[self activeDocument].editor setString:@"Unsaved draft note in untitled tab\n"];
+        [self activeDocument].dirty = YES;
+
+        // And open an existing file with unsaved edits
+        NSString *testModFile = @"/tmp/test_mod_file.txt";
+        [@"Original saved disk content\n" writeToFile:testModFile atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        [self openDocument:testModFile];
+        [[self activeDocument].editor setString:@"Original saved disk content + Unsaved addition!\n"];
+        [self activeDocument].dirty = YES;
+
+        // Save session snapshot
+        [self saveSession];
+
+        // Simulate app quit and restart: reset and restore
+        [self resetDocuments];
+        BOOL restored = [self restoreSession];
+
+        BOOL restoreCountOK = restored && (self.documents.count == 2);
+        printf("%s restore session count=%lu restored=%d\n",
+               restoreCountOK ? "OK  " : "FAIL", (unsigned long)self.documents.count, restored);
+        if (!restoreCountOK) failures++;
+
+        // Verify untitled document was restored with unsaved text & dirty flag
+        EditorDocument *restoredUntitled = self.documents[0];
+        NSString *untitledText = [restoredUntitled.editor string];
+        BOOL untitledOK = restoredUntitled.path == nil &&
+                          [untitledText containsString:@"Unsaved draft note"] &&
+                          restoredUntitled.dirty;
+        printf("%s untitled tab restored title=%s dirty=%d textMatched=%d\n",
+               untitledOK ? "OK  " : "FAIL",
+               [restoredUntitled.displayName UTF8String],
+               restoredUntitled.dirty,
+               [untitledText containsString:@"Unsaved draft note"]);
+        if (!untitledOK) failures++;
+
+        // Verify modified file was restored with unsaved edits & dirty flag
+        EditorDocument *restoredMod = self.documents[1];
+        NSString *modText = [restoredMod.editor string];
+        BOOL modOK = [restoredMod.path isEqualToString:testModFile] &&
+                     [modText containsString:@"Unsaved addition!"] &&
+                     restoredMod.dirty;
+        printf("%s modified file restored path=%s dirty=%d unsavedEditsPreserved=%d\n",
+               modOK ? "OK  " : "FAIL",
+               [restoredMod.displayName UTF8String],
+               restoredMod.dirty,
+               [modText containsString:@"Unsaved addition!"]);
+        if (!modOK) failures++;
+
+        // 3. Test Open Recent Menu
+        printf("== open recent documents ==\n");
+        [self addRecentDocument:@"/tmp/test_recent_doc_1.txt"];
+        [self addRecentDocument:@"/tmp/test_recent_doc_2.txt"];
+        BOOL recentPopulated = self.recentMenu && self.recentMenu.itemArray.count >= 3; // 2 items + separator + clear
+        printf("%s open recent menu populated items=%lu\n",
+               recentPopulated ? "OK  " : "FAIL", (unsigned long)self.recentMenu.itemArray.count);
+        if (!recentPopulated) failures++;
+
+        [self clearRecentDocuments:nil];
+        NSArray *recentsAfterClear = [[NSUserDefaults standardUserDefaults] objectForKey:@"CatatanRecentDocuments"];
+        BOOL recentsCleared = (recentsAfterClear == nil || recentsAfterClear.count == 0);
+        printf("%s open recent menu cleared=%d\n", recentsCleared ? "OK  " : "FAIL", recentsCleared);
+        if (!recentsCleared) failures++;
+
         [[NSFileManager defaultManager] removeItemAtPath:sessPath error:NULL];
+        [[NSFileManager defaultManager] removeItemAtPath:testModFile error:NULL];
     }
 
     // == find in files ==
