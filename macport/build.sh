@@ -98,7 +98,7 @@ cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
   <key>CFBundleExecutable</key><string>Catatan++</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0.4</string>
+  <key>CFBundleShortVersionString</key><string>1.0.5</string>
   <key>CFBundleVersion</key><string>4</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>NSHighResolutionCapable</key><true/>

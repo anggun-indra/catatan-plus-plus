@@ -196,6 +196,8 @@ static const CGFloat kCloseSize = 16.0;
     NSRectFill(NSMakeRect(0, 0, self.bounds.size.width, 1));
 }
 
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+
 - (void)mouseDown:(NSEvent *)event {
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
     [self recomputeLayout];
@@ -550,6 +552,24 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     return doc;
 }
 
+- (void)focusActiveEditor {
+    EditorDocument *doc = [self activeDocument];
+    if (!doc || !doc.editor) return;
+
+    NSView *targetView = doc.editor;
+    if ([doc.editor respondsToSelector:@selector(content)]) {
+        NSView *contentView = (NSView *)[doc.editor content];
+        if (contentView) targetView = contentView;
+    }
+    if (self.window) {
+        if (!self.window.isKeyWindow) {
+            [self.window makeKeyWindow];
+        }
+        [self.window makeFirstResponder:targetView];
+    }
+    [doc.editor setGeneralProperty:SCI_SETFOCUS parameter:1 value:0];
+}
+
 - (void)addDocument:(EditorDocument *)doc {
     [self.documents addObject:doc];
     [self showDocumentAtIndex:(NSInteger)self.documents.count - 1];
@@ -562,6 +582,10 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     EditorDocument *doc = [self makeDocumentWithPath:nil text:nil lang:@"normal"];
     [self addDocument:doc];
     [self updateUI];
+    [self focusActiveEditor];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self focusActiveEditor];
+    });
 }
 
 - (NSInteger)indexOfDocumentWithPath:(NSString *)path {
@@ -605,6 +629,10 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
         [self addRecentDocument:path];
     }
     [self updateUI];
+    [self focusActiveEditor];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self focusActiveEditor];
+    });
 }
 
 - (void)showDocumentAtIndex:(NSInteger)index {
@@ -631,7 +659,11 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
         doc.editor.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         [self.editorContainer addSubview:doc.editor];
     }
-    [doc.editor setGeneralProperty:SCI_SETFOCUS parameter:1 value:0];
+
+    [self focusActiveEditor];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self focusActiveEditor];
+    });
 
     self.tabStrip.selectedIndex = index;
     [self updateUI];
@@ -1625,6 +1657,10 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
 
 - (void)tabStrip:(TabStripView *)strip didSelectIndex:(NSInteger)index {
     [self showDocumentAtIndex:index];
+    [self focusActiveEditor];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self focusActiveEditor];
+    });
 }
 
 - (void)tabStrip:(TabStripView *)strip didCloseIndex:(NSInteger)index {
@@ -2801,7 +2837,7 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     (void)sender;
     NSDictionary *options = @{
         NSAboutPanelOptionApplicationName: @"Catatan++",
-        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.4",
+        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.5",
         NSAboutPanelOptionVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"4",
         @"Copyright": @"© 2026 Anggun Indra & Upstream Notepad++ Contributors"
     };
@@ -3213,6 +3249,10 @@ static NSMutableArray<NSString *> *gLangOrder;
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
     [self updateUI];
+    [self focusActiveEditor];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self focusActiveEditor];
+    });
 
     [AutoUpdater sharedUpdater].delegate = self;
     if (!self.selfTestPath) {
@@ -3489,6 +3529,14 @@ static NSMutableArray<NSString *> *gLangOrder;
     [self resetDocuments];
 
     [self newDocument];
+    NSResponder *fr = [self.window firstResponder];
+    NSView *expectedContent = (NSView *)[[self activeDocument].editor content];
+    BOOL focusOK = (fr == expectedContent);
+    printf("%s new tab gives immediate keyboard focus (firstResponder=%s)\n",
+           focusOK ? "OK  " : "FAIL",
+           [NSStringFromClass([fr class]) UTF8String]);
+    if (!focusOK) failures++;
+
     [self.editor setString:@"alpha"];
     [self newDocument];
     [self.editor setString:@"beta"];
