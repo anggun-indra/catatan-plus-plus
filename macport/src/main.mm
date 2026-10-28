@@ -422,7 +422,12 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
 }
 
 - (ScintillaView *)makeEditor {
-    ScintillaView *sci = [[ScintillaView alloc] initWithFrame:NSMakeRect(0, 0, 1000, 660)];
+    NSRect initialFrame = self.editorContainer ? self.editorContainer.bounds : NSMakeRect(0, 0, 1000, 660);
+    if (NSIsEmptyRect(initialFrame) || initialFrame.size.width < 100 || initialFrame.size.height < 100) {
+        initialFrame = NSMakeRect(0, 0, 1000, 660);
+    }
+    ScintillaView *sci = [[ScintillaView alloc] initWithFrame:initialFrame];
+    [sci setFrame:initialFrame];
 
     [sci setGeneralProperty:SCI_SETCODEPAGE parameter:SC_CP_UTF8 value:0];
     [sci setGeneralProperty:SCI_SETMARGINTYPEN parameter:0 value:SC_MARGIN_NUMBER];
@@ -658,6 +663,16 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
         doc.editor.frame = self.editorContainer.bounds;
         doc.editor.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
         [self.editorContainer addSubview:doc.editor];
+    }
+
+    // Ensure horizontal scroll offset is not unnecessarily shifted to the right on lines that fit on screen
+    long xOff = [doc.editor getGeneralProperty:SCI_GETXOFFSET parameter:0];
+    if (xOff > 0) {
+        long curPos = [doc.editor getGeneralProperty:SCI_GETCURRENTPOS parameter:0];
+        long ptX = [doc.editor message:SCI_POINTXFROMPOSITION wParam:0 lParam:curPos];
+        if ((ptX + xOff) < NSWidth(self.editorContainer.bounds)) {
+            [doc.editor setGeneralProperty:SCI_SETXOFFSET parameter:0 value:0];
+        }
     }
 
     [self focusActiveEditor];
@@ -1601,6 +1616,7 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
             }
             if (pos > 0) {
                 [doc.editor setGeneralProperty:SCI_GOTOPOS parameter:pos value:0];
+                [doc.editor setGeneralProperty:SCI_SETXOFFSET parameter:0 value:0];
             }
             if (dirty || text.length > 0) {
                 doc.dirty = YES;
@@ -1630,6 +1646,7 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
                     }
                     if (pos > 0) {
                         [doc.editor setGeneralProperty:SCI_GOTOPOS parameter:pos value:0];
+                        [doc.editor setGeneralProperty:SCI_SETXOFFSET parameter:0 value:0];
                     }
                     [self.documents addObject:doc];
                     restoredCount++;
@@ -2837,7 +2854,7 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     (void)sender;
     NSDictionary *options = @{
         NSAboutPanelOptionApplicationName: @"Catatan++",
-        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.5",
+        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.6",
         NSAboutPanelOptionVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"4",
         @"Copyright": @"© 2026 Anggun Indra & Upstream Notepad++ Contributors"
     };
@@ -4482,6 +4499,8 @@ static NSMutableArray<NSString *> *gLangOrder;
         [self openDocument:testModFile];
         [[self activeDocument].editor setString:@"Original saved disk content + Unsaved addition!\n"];
         [self activeDocument].dirty = YES;
+        // Position caret at column 25 to verify horizontal scroll does not drift rightwards
+        [[self activeDocument].editor setGeneralProperty:SCI_GOTOPOS parameter:25 value:0];
 
         // Save session snapshot
         [self saveSession];
@@ -4520,6 +4539,14 @@ static NSMutableArray<NSString *> *gLangOrder;
                restoredMod.dirty,
                [modText containsString:@"Unsaved addition!"]);
         if (!modOK) failures++;
+
+        // Verify horizontal scroll offset is 0 (first column fully visible, not scrolled to the right)
+        long xOffUntitled = [restoredUntitled.editor getGeneralProperty:SCI_GETXOFFSET parameter:0];
+        long xOffMod = [restoredMod.editor getGeneralProperty:SCI_GETXOFFSET parameter:0];
+        BOOL xOffOK = (xOffUntitled == 0) && (xOffMod == 0);
+        printf("%s restored documents horizontal scroll offset is 0 (untitled=%ld, mod=%ld)\n",
+               xOffOK ? "OK  " : "FAIL", xOffUntitled, xOffMod);
+        if (!xOffOK) failures++;
 
         // 3. Test Open Recent Menu
         printf("== open recent documents ==\n");

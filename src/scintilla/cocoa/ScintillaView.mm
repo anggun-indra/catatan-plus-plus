@@ -1524,6 +1524,8 @@ static NSCursor *cursorFromEnum(Window::Cursor cursor) {
 			     object: scrollView.contentView];
 
 		mBackend->UpdateBaseElements();
+		[self positionSubViews];
+		mBackend->Resize();
 	}
 	return self;
 }
