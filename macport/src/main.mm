@@ -63,6 +63,7 @@ static NSColor *HexColor(unsigned rgb) {
 @protocol TabStripViewDelegate <NSObject>
 - (void)tabStrip:(TabStripView *)strip didSelectIndex:(NSInteger)index;
 - (void)tabStrip:(TabStripView *)strip didCloseIndex:(NSInteger)index;
+- (void)tabStrip:(TabStripView *)strip didMoveTabFromIndex:(NSInteger)fromIndex toIndex:(NSInteger)toIndex;
 - (NSMenu *)tabStrip:(TabStripView *)strip menuForTabIndex:(NSInteger)index;
 @end
 
@@ -72,10 +73,17 @@ static NSColor *HexColor(unsigned rgb) {
 @property (nonatomic, copy) NSArray<NSNumber *> *dirtyFlags;
 @property (nonatomic) NSInteger selectedIndex;
 - (void)refresh;
+- (NSRect)rectForTabAtIndex:(NSInteger)index;
 @end
 
 @implementation TabStripView {
     NSMutableArray<NSValue *> *_tabRects;
+    NSInteger _pressedIndex;
+    BOOL _isDragging;
+    NSInteger _draggingIndex;
+    NSPoint _mouseDownPoint;
+    CGFloat _dragOffsetInTab;
+    CGFloat _currentDragX;
 }
 
 static const CGFloat kTabHeight = 30.0;
@@ -84,6 +92,14 @@ static const CGFloat kCloseSize = 16.0;
 - (void)refresh {
     [self recomputeLayout];
     [self setNeedsDisplay:YES];
+}
+
+- (NSRect)rectForTabAtIndex:(NSInteger)index {
+    [self recomputeLayout];
+    if (index >= 0 && index < (NSInteger)_tabRects.count) {
+        return _tabRects[index].rectValue;
+    }
+    return NSZeroRect;
 }
 
 - (BOOL)isFlipped { return NO; }
@@ -132,6 +148,59 @@ static const CGFloat kCloseSize = 16.0;
                       kCloseSize, kCloseSize);
 }
 
+- (void)drawSingleTabAtIndex:(NSUInteger)i inRect:(NSRect)tab selected:(BOOL)selected isFloating:(BOOL)isFloating {
+    NSRect fill = NSInsetRect(tab, 1, 2);
+    NSBezierPath *bg = [NSBezierPath bezierPathWithRoundedRect:fill xRadius:5 yRadius:5];
+    if (selected || isFloating)
+        [[NSColor whiteColor] setFill];
+    else
+        [[NSColor colorWithCalibratedWhite:0.84 alpha:1.0] setFill];
+    [bg fill];
+
+    if (selected || isFloating) {
+        [[NSColor colorWithCalibratedWhite:isFloating ? 0.70 : 0.80 alpha:1.0] setStroke];
+        [bg setLineWidth:isFloating ? 1.5 : 1.0];
+        [bg stroke];
+    }
+
+    BOOL dirty = (i < self.dirtyFlags.count) && self.dirtyFlags[i].boolValue;
+    CGFloat textLeft = NSMinX(fill) + 10;
+    if (dirty) {
+        NSRect dot = NSMakeRect(textLeft, NSMidY(fill) - 3, 6, 6);
+        [[NSColor colorWithCalibratedRed:0.85 green:0.45 blue:0.05 alpha:1.0] setFill];
+        [[NSBezierPath bezierPathWithOvalInRect:dot] fill];
+        textLeft += 11;
+    }
+
+    NSRect titleRect = NSMakeRect(textLeft,
+                                  NSMidY(fill) - 9,
+                                  NSMaxX(fill) - kCloseSize - 14 - textLeft,
+                                  18);
+    NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    NSDictionary *attrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:12 weight:(selected || isFloating) ? NSFontWeightMedium : NSFontWeightRegular],
+        NSForegroundColorAttributeName: (selected || isFloating)
+            ? [NSColor colorWithCalibratedWhite:0.12 alpha:1.0]
+            : [NSColor colorWithCalibratedWhite:0.35 alpha:1.0],
+        NSParagraphStyleAttributeName: ps,
+    };
+    if (i < self.titles.count) {
+        [self.titles[i] drawInRect:titleRect withAttributes:attrs];
+    }
+
+    NSRect closeRect = [self closeRectForTab:tab];
+    NSBezierPath *x = [NSBezierPath bezierPath];
+    CGFloat inset = 4.5;
+    [x moveToPoint:NSMakePoint(NSMinX(closeRect) + inset, NSMinY(closeRect) + inset)];
+    [x lineToPoint:NSMakePoint(NSMaxX(closeRect) - inset, NSMaxY(closeRect) - inset)];
+    [x moveToPoint:NSMakePoint(NSMaxX(closeRect) - inset, NSMinY(closeRect) + inset)];
+    [x lineToPoint:NSMakePoint(NSMinX(closeRect) + inset, NSMaxY(closeRect) - inset)];
+    [x setLineWidth:1.4];
+    [[NSColor colorWithCalibratedWhite:(selected || isFloating) ? 0.45 : 0.55 alpha:1.0] setStroke];
+    [x stroke];
+}
+
 - (void)drawRect:(NSRect)dirtyRect {
     [[NSColor colorWithCalibratedWhite:0.92 alpha:1.0] setFill];
     NSRectFill(self.bounds);
@@ -140,56 +209,32 @@ static const CGFloat kCloseSize = 16.0;
 
     for (NSUInteger i = 0; i < _tabRects.count; i++) {
         NSRect tab = _tabRects[i].rectValue;
+        if (_isDragging && (NSInteger)i == _draggingIndex) {
+            // Draw recessed placeholder slot where the tab currently belongs
+            NSRect fill = NSInsetRect(tab, 1, 2);
+            [[NSColor colorWithCalibratedWhite:0.86 alpha:1.0] setFill];
+            [[NSBezierPath bezierPathWithRoundedRect:fill xRadius:5 yRadius:5] fill];
+            continue;
+        }
+
         BOOL selected = ((NSInteger)i == self.selectedIndex);
+        [self drawSingleTabAtIndex:i inRect:tab selected:selected isFloating:NO];
+    }
 
-        NSRect fill = NSInsetRect(tab, 1, 2);
-        NSBezierPath *bg = [NSBezierPath bezierPathWithRoundedRect:fill xRadius:5 yRadius:5];
-        if (selected)
-            [[NSColor whiteColor] setFill];
-        else
-            [[NSColor colorWithCalibratedWhite:0.84 alpha:1.0] setFill];
-        [bg fill];
+    // Draw the floating dragged tab on top of all other tabs
+    if (_isDragging && _draggingIndex >= 0 && _draggingIndex < (NSInteger)_tabRects.count) {
+        NSRect origTab = _tabRects[_draggingIndex].rectValue;
+        NSRect floatRect = NSMakeRect(_currentDragX, origTab.origin.y, origTab.size.width, origTab.size.height);
 
-        if (selected) {
-            [[NSColor colorWithCalibratedWhite:0.80 alpha:1.0] setStroke];
-            [bg setLineWidth:1.0];
-            [bg stroke];
-        }
+        [NSGraphicsContext saveGraphicsState];
+        NSShadow *shadow = [[NSShadow alloc] init];
+        shadow.shadowColor = [NSColor colorWithCalibratedWhite:0.0 alpha:0.25];
+        shadow.shadowOffset = NSMakeSize(0, -2);
+        shadow.shadowBlurRadius = 5.0;
+        [shadow set];
 
-        BOOL dirty = (i < self.dirtyFlags.count) && self.dirtyFlags[i].boolValue;
-        CGFloat textLeft = NSMinX(fill) + 10;
-        if (dirty) {
-            NSRect dot = NSMakeRect(textLeft, NSMidY(fill) - 3, 6, 6);
-            [[NSColor colorWithCalibratedRed:0.85 green:0.45 blue:0.05 alpha:1.0] setFill];
-            [[NSBezierPath bezierPathWithOvalInRect:dot] fill];
-            textLeft += 11;
-        }
-
-        NSRect titleRect = NSMakeRect(textLeft,
-                                      NSMidY(fill) - 9,
-                                      NSMaxX(fill) - kCloseSize - 14 - textLeft,
-                                      18);
-        NSMutableParagraphStyle *ps = [[NSMutableParagraphStyle alloc] init];
-        ps.lineBreakMode = NSLineBreakByTruncatingMiddle;
-        NSDictionary *attrs = @{
-            NSFontAttributeName: [NSFont systemFontOfSize:12],
-            NSForegroundColorAttributeName: selected
-                ? [NSColor colorWithCalibratedWhite:0.12 alpha:1.0]
-                : [NSColor colorWithCalibratedWhite:0.35 alpha:1.0],
-            NSParagraphStyleAttributeName: ps,
-        };
-        [self.titles[i] drawInRect:titleRect withAttributes:attrs];
-
-        NSRect closeRect = [self closeRectForTab:tab];
-        NSBezierPath *x = [NSBezierPath bezierPath];
-        CGFloat inset = 4.5;
-        [x moveToPoint:NSMakePoint(NSMinX(closeRect) + inset, NSMinY(closeRect) + inset)];
-        [x lineToPoint:NSMakePoint(NSMaxX(closeRect) - inset, NSMaxY(closeRect) - inset)];
-        [x moveToPoint:NSMakePoint(NSMaxX(closeRect) - inset, NSMinY(closeRect) + inset)];
-        [x lineToPoint:NSMakePoint(NSMinX(closeRect) + inset, NSMaxY(closeRect) - inset)];
-        [x setLineWidth:1.4];
-        [[NSColor colorWithCalibratedWhite:selected ? 0.45 : 0.55 alpha:1.0] setStroke];
-        [x stroke];
+        [self drawSingleTabAtIndex:(NSUInteger)_draggingIndex inRect:floatRect selected:YES isFloating:YES];
+        [NSGraphicsContext restoreGraphicsState];
     }
 
     [[NSColor colorWithCalibratedWhite:0.78 alpha:1.0] setFill];
@@ -202,19 +247,103 @@ static const CGFloat kCloseSize = 16.0;
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
     [self recomputeLayout];
 
+    _pressedIndex = -1;
+    _isDragging = NO;
+    _draggingIndex = -1;
+
     for (NSUInteger i = 0; i < _tabRects.count; i++) {
         NSRect tab = _tabRects[i].rectValue;
         if (!NSPointInRect(p, tab)) continue;
 
-        if (NSPointInRect(p, [self closeRectForTab:tab]))
+        if (NSPointInRect(p, [self closeRectForTab:tab])) {
             [self.tabDelegate tabStrip:self didCloseIndex:(NSInteger)i];
-        else
-            [self.tabDelegate tabStrip:self didSelectIndex:(NSInteger)i];
+            return;
+        }
+
+        _pressedIndex = (NSInteger)i;
+        _draggingIndex = (NSInteger)i;
+        _mouseDownPoint = p;
+        _dragOffsetInTab = p.x - NSMinX(tab);
+        _currentDragX = NSMinX(tab);
+
+        [self.tabDelegate tabStrip:self didSelectIndex:(NSInteger)i];
         return;
     }
 }
 
+- (void)mouseDragged:(NSEvent *)event {
+    if (_pressedIndex < 0 || _tabRects.count < 2) return;
+
+    NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+
+    if (!_isDragging) {
+        CGFloat dx = p.x - _mouseDownPoint.x;
+        CGFloat dy = p.y - _mouseDownPoint.y;
+        if (hypot(dx, dy) < 4.0) return;
+        _isDragging = YES;
+    }
+
+    if (_draggingIndex < 0 || _draggingIndex >= (NSInteger)_tabRects.count) return;
+
+    CGFloat currentTabWidth = _tabRects[_draggingIndex].rectValue.size.width;
+    CGFloat newDragX = p.x - _dragOffsetInTab;
+
+    CGFloat minX = 0;
+    CGFloat maxX = self.bounds.size.width - currentTabWidth;
+    if (maxX < minX) maxX = minX;
+    _currentDragX = MAX(minX, MIN(maxX, newDragX));
+
+    CGFloat dragCenter = _currentDragX + currentTabWidth / 2.0;
+
+    // Check if dragged tab crossed the midpoint of adjacent tabs
+    // Move Right:
+    while (_draggingIndex < (NSInteger)_tabRects.count - 1) {
+        NSRect nextRect = _tabRects[_draggingIndex + 1].rectValue;
+        if (dragCenter >= NSMidX(nextRect)) {
+            NSInteger from = _draggingIndex;
+            NSInteger to = _draggingIndex + 1;
+            _draggingIndex = to;
+            if ([self.tabDelegate respondsToSelector:@selector(tabStrip:didMoveTabFromIndex:toIndex:)]) {
+                [self.tabDelegate tabStrip:self didMoveTabFromIndex:from toIndex:to];
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Move Left:
+    while (_draggingIndex > 0) {
+        NSRect prevRect = _tabRects[_draggingIndex - 1].rectValue;
+        if (dragCenter <= NSMidX(prevRect)) {
+            NSInteger from = _draggingIndex;
+            NSInteger to = _draggingIndex - 1;
+            _draggingIndex = to;
+            if ([self.tabDelegate respondsToSelector:@selector(tabStrip:didMoveTabFromIndex:toIndex:)]) {
+                [self.tabDelegate tabStrip:self didMoveTabFromIndex:from toIndex:to];
+            }
+        } else {
+            break;
+        }
+    }
+
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    if (_isDragging) {
+        _isDragging = NO;
+        _draggingIndex = -1;
+        _pressedIndex = -1;
+        [self refresh];
+    } else {
+        _pressedIndex = -1;
+    }
+}
+
 - (NSMenu *)menuForEvent:(NSEvent *)event {
+    _isDragging = NO;
+    _pressedIndex = -1;
+    _draggingIndex = -1;
     NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
     [self recomputeLayout];
 
@@ -1684,6 +1813,51 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     [self closeDocumentAtIndex:index];
 }
 
+- (void)tabStrip:(TabStripView *)strip didMoveTabFromIndex:(NSInteger)fromIndex toIndex:(NSInteger)toIndex {
+    [self moveDocumentFromIndex:fromIndex toIndex:toIndex];
+}
+
+- (void)moveDocumentFromIndex:(NSInteger)fromIndex toIndex:(NSInteger)toIndex {
+    if (fromIndex == toIndex) return;
+    if (fromIndex < 0 || fromIndex >= (NSInteger)self.documents.count) return;
+    if (toIndex < 0 || toIndex >= (NSInteger)self.documents.count) return;
+
+    EditorDocument *doc = self.documents[fromIndex];
+    [self.documents removeObjectAtIndex:fromIndex];
+    [self.documents insertObject:doc atIndex:toIndex];
+
+    self.activeIndex = toIndex;
+
+    [self updateUI];
+    [self saveSession];
+}
+
+- (void)moveCurrentTabForward {
+    if (self.documents.count < 2) return;
+    NSInteger cur = self.activeIndex;
+    if (cur >= 0 && cur < (NSInteger)self.documents.count - 1) {
+        [self moveDocumentFromIndex:cur toIndex:cur + 1];
+    }
+}
+
+- (void)moveCurrentTabBackward {
+    if (self.documents.count < 2) return;
+    NSInteger cur = self.activeIndex;
+    if (cur > 0 && cur < (NSInteger)self.documents.count) {
+        [self moveDocumentFromIndex:cur toIndex:cur - 1];
+    }
+}
+
+- (void)moveCurrentTabToStart {
+    if (self.documents.count < 2 || self.activeIndex <= 0) return;
+    [self moveDocumentFromIndex:self.activeIndex toIndex:0];
+}
+
+- (void)moveCurrentTabToEnd {
+    if (self.documents.count < 2 || self.activeIndex < 0 || self.activeIndex >= (NSInteger)self.documents.count - 1) return;
+    [self moveDocumentFromIndex:self.activeIndex toIndex:(NSInteger)self.documents.count - 1];
+}
+
 - (void)closeOtherTabsAction:(id)sender {
     (void)sender;
     NSInteger active = self.activeIndex;
@@ -1750,6 +1924,35 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     NSMenuItem *closeAll = [[NSMenuItem alloc] initWithTitle:@"Close All" action:@selector(closeAllDocuments) keyEquivalent:@""];
     closeAll.target = self;
     [menu addItem:closeAll];
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *moveItem = [[NSMenuItem alloc] initWithTitle:@"Move Tab" action:nil keyEquivalent:@""];
+    NSMenu *moveMenu = [[NSMenu alloc] initWithTitle:@"Move Tab"];
+
+    NSMenuItem *moveLeft = [[NSMenuItem alloc] initWithTitle:@"Move Tab Backward (Left)" action:@selector(moveCurrentTabBackward) keyEquivalent:@""];
+    moveLeft.target = self;
+    moveLeft.enabled = (self.activeIndex > 0);
+    [moveMenu addItem:moveLeft];
+
+    NSMenuItem *moveRight = [[NSMenuItem alloc] initWithTitle:@"Move Tab Forward (Right)" action:@selector(moveCurrentTabForward) keyEquivalent:@""];
+    moveRight.target = self;
+    moveRight.enabled = (self.activeIndex >= 0 && self.activeIndex < (NSInteger)self.documents.count - 1);
+    [moveMenu addItem:moveRight];
+
+    [moveMenu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *moveStart = [[NSMenuItem alloc] initWithTitle:@"Move to Start" action:@selector(moveCurrentTabToStart) keyEquivalent:@""];
+    moveStart.target = self;
+    moveStart.enabled = (self.activeIndex > 0);
+    [moveMenu addItem:moveStart];
+
+    NSMenuItem *moveEnd = [[NSMenuItem alloc] initWithTitle:@"Move to End" action:@selector(moveCurrentTabToEnd) keyEquivalent:@""];
+    moveEnd.target = self;
+    moveEnd.enabled = (self.activeIndex >= 0 && self.activeIndex < (NSInteger)self.documents.count - 1);
+    [moveMenu addItem:moveEnd];
+
+    moveItem.submenu = moveMenu;
+    [menu addItem:moveItem];
     [menu addItem:[NSMenuItem separatorItem]];
 
     NSMenuItem *save = [[NSMenuItem alloc] initWithTitle:@"Save" action:@selector(saveCurrent) keyEquivalent:@""];
@@ -2854,7 +3057,7 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     (void)sender;
     NSDictionary *options = @{
         NSAboutPanelOptionApplicationName: @"Catatan++",
-        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.6",
+        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.7",
         NSAboutPanelOptionVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"4",
         @"Copyright": @"© 2026 Anggun Indra & Upstream Notepad++ Contributors"
     };
@@ -3027,6 +3230,32 @@ static NSMutableArray<NSString *> *gLangOrder;
     prev.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     prev.target = self;
     [viewMenu addItem:prev];
+
+    NSMenuItem *moveTabItem = [[NSMenuItem alloc] initWithTitle:@"Move Tab" action:nil keyEquivalent:@""];
+    NSMenu *moveTabMenu = [[NSMenu alloc] initWithTitle:@"Move Tab"];
+
+    NSMenuItem *mBack = [[NSMenuItem alloc] initWithTitle:@"Move Tab Left" action:@selector(moveCurrentTabBackward) keyEquivalent:@"["];
+    mBack.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    mBack.target = self;
+    [moveTabMenu addItem:mBack];
+
+    NSMenuItem *mFwd = [[NSMenuItem alloc] initWithTitle:@"Move Tab Right" action:@selector(moveCurrentTabForward) keyEquivalent:@"]"];
+    mFwd.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    mFwd.target = self;
+    [moveTabMenu addItem:mFwd];
+
+    [moveTabMenu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *mStart = [[NSMenuItem alloc] initWithTitle:@"Move Tab to Start" action:@selector(moveCurrentTabToStart) keyEquivalent:@""];
+    mStart.target = self;
+    [moveTabMenu addItem:mStart];
+
+    NSMenuItem *mEnd = [[NSMenuItem alloc] initWithTitle:@"Move Tab to End" action:@selector(moveCurrentTabToEnd) keyEquivalent:@""];
+    mEnd.target = self;
+    [moveTabMenu addItem:mEnd];
+
+    moveTabItem.submenu = moveTabMenu;
+    [viewMenu addItem:moveTabItem];
     viewItem.submenu = viewMenu;
     [bar addItem:viewItem];
 
@@ -3594,6 +3823,126 @@ static NSMutableArray<NSString *> *gLangOrder;
     printf("%s content preserved=%s expected=alpha\n",
            [afterClose isEqualToString:@"alpha"] ? "OK  " : "FAIL", [afterClose UTF8String]);
     if (![afterClose isEqualToString:@"alpha"]) failures++;
+
+    printf("== tab reordering & move commands ==\n");
+    {
+        [self resetDocuments];
+        [self newDocument]; // Doc 0: new 1
+        [self.editor setString:@"content 1"];
+        [self newDocument]; // Doc 1: new 2
+        [self.editor setString:@"content 2"];
+        [self newDocument]; // Doc 2: new 3
+        [self.editor setString:@"content 3"];
+
+        BOOL initialOrder = [self.documents[0].displayName isEqualToString:@"new 1"] &&
+                            [self.documents[1].displayName isEqualToString:@"new 2"] &&
+                            [self.documents[2].displayName isEqualToString:@"new 3"];
+        printf("%s tab order initially [new 1, new 2, new 3]=%d\n", initialOrder ? "OK  " : "FAIL", initialOrder);
+        if (!initialOrder) failures++;
+
+        // Move Tab 0 to index 2: [new 2, new 3, new 1]
+        [self moveDocumentFromIndex:0 toIndex:2];
+        BOOL moveToEnd = [self.documents[0].displayName isEqualToString:@"new 2"] &&
+                         [self.documents[1].displayName isEqualToString:@"new 3"] &&
+                         [self.documents[2].displayName isEqualToString:@"new 1"] &&
+                         self.activeIndex == 2;
+        printf("%s move tab 0 to end (2)=%d active=%ld\n", moveToEnd ? "OK  " : "FAIL", moveToEnd, (long)self.activeIndex);
+        if (!moveToEnd) failures++;
+
+        // Move current tab (new 1 at 2) backward: [new 2, new 1, new 3]
+        [self moveCurrentTabBackward];
+        BOOL moveLeft = [self.documents[0].displayName isEqualToString:@"new 2"] &&
+                        [self.documents[1].displayName isEqualToString:@"new 1"] &&
+                        [self.documents[2].displayName isEqualToString:@"new 3"] &&
+                        self.activeIndex == 1;
+        printf("%s move current tab backward (1)=%d active=%ld\n", moveLeft ? "OK  " : "FAIL", moveLeft, (long)self.activeIndex);
+        if (!moveLeft) failures++;
+
+        // Move current tab to start: [new 1, new 2, new 3]
+        [self moveCurrentTabToStart];
+        BOOL moveStart = [self.documents[0].displayName isEqualToString:@"new 1"] &&
+                         [self.documents[1].displayName isEqualToString:@"new 2"] &&
+                         [self.documents[2].displayName isEqualToString:@"new 3"] &&
+                         self.activeIndex == 0;
+        printf("%s move current tab to start (0)=%d active=%ld\n", moveStart ? "OK  " : "FAIL", moveStart, (long)self.activeIndex);
+        if (!moveStart) failures++;
+
+        // Move current tab forward: [new 2, new 1, new 3]
+        [self moveCurrentTabForward];
+        BOOL moveRight = [self.documents[0].displayName isEqualToString:@"new 2"] &&
+                         [self.documents[1].displayName isEqualToString:@"new 1"] &&
+                         [self.documents[2].displayName isEqualToString:@"new 3"] &&
+                         self.activeIndex == 1;
+        printf("%s move current tab forward (1)=%d active=%ld\n", moveRight ? "OK  " : "FAIL", moveRight, (long)self.activeIndex);
+        if (!moveRight) failures++;
+
+        // Move current tab to end: [new 2, new 3, new 1]
+        [self moveCurrentTabToEnd];
+        BOOL moveEnd = [self.documents[0].displayName isEqualToString:@"new 2"] &&
+                       [self.documents[1].displayName isEqualToString:@"new 3"] &&
+                       [self.documents[2].displayName isEqualToString:@"new 1"] &&
+                       self.activeIndex == 2;
+        printf("%s move current tab to end (2)=%d active=%ld\n", moveEnd ? "OK  " : "FAIL", moveEnd, (long)self.activeIndex);
+        if (!moveEnd) failures++;
+
+        // Context menu check
+        NSMenu *tMenu = [self tabStrip:self.tabStrip menuForTabIndex:2];
+        BOOL hasMoveMenu = NO;
+        for (NSMenuItem *item in tMenu.itemArray) {
+            if ([item.title isEqualToString:@"Move Tab"] && item.submenu != nil) {
+                hasMoveMenu = YES;
+                break;
+            }
+        }
+        printf("%s tab context menu has Move Tab submenu=%d\n", hasMoveMenu ? "OK  " : "FAIL", hasMoveMenu);
+        if (!hasMoveMenu) failures++;
+
+        // Interactive mouse drag simulation on TabStripView:
+        // Current tabs: [new 2, new 3, new 1]
+        // Let's drag new 1 (at index 2) all the way left to index 0:
+        NSRect rTab2 = [self.tabStrip rectForTabAtIndex:2];
+        NSPoint localStart = NSMakePoint(NSMidX(rTab2), NSMidY(rTab2));
+        NSPoint winStart = [self.tabStrip convertPoint:localStart toView:nil];
+        NSEvent *downEv = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown
+                                             location:winStart
+                                        modifierFlags:0
+                                            timestamp:0
+                                         windowNumber:self.window.windowNumber
+                                              context:nil
+                                          eventNumber:1
+                                           clickCount:1
+                                             pressure:1.0];
+        [self.tabStrip mouseDown:downEv];
+
+        NSRect rTab0 = [self.tabStrip rectForTabAtIndex:0];
+        NSPoint localDrag = NSMakePoint(NSMinX(rTab0) + 10, NSMidY(rTab0));
+        NSPoint winDrag = [self.tabStrip convertPoint:localDrag toView:nil];
+        NSEvent *dragEv = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDragged
+                                             location:winDrag
+                                        modifierFlags:0
+                                            timestamp:0.1
+                                         windowNumber:self.window.windowNumber
+                                              context:nil
+                                          eventNumber:2
+                                           clickCount:1
+                                             pressure:1.0];
+        [self.tabStrip mouseDragged:dragEv];
+
+        NSEvent *upEv = [NSEvent mouseEventWithType:NSEventTypeLeftMouseUp
+                                           location:winDrag
+                                      modifierFlags:0
+                                          timestamp:0.2
+                                       windowNumber:self.window.windowNumber
+                                            context:nil
+                                        eventNumber:3
+                                         clickCount:1
+                                           pressure:0.0];
+        [self.tabStrip mouseUp:upEv];
+
+        BOOL dragOK = [self.documents[0].displayName isEqualToString:@"new 1"] && self.activeIndex == 0;
+        printf("%s tab mouse drag event simulation moved tab to index 0=%d\n", dragOK ? "OK  " : "FAIL", dragOK);
+        if (!dragOK) failures++;
+    }
 
     printf("== open two files ==\n");
     [self resetDocuments];
