@@ -39,7 +39,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const matrixZipBtn = document.getElementById('matrixZipBtn');
 
   // Fallback defaults
-  const fallbackVersion = 'v1.0.3';
+  const fallbackVersion = 'v1.0.4';
   const fallbackDmgURL = `https://github.com/${repoOwner}/${repoName}/releases/download/${fallbackVersion}/Catatan%2B%2B-${fallbackVersion}-macOS-arm64.dmg`;
   const fallbackZipURL = `https://github.com/${repoOwner}/${repoName}/releases/download/${fallbackVersion}/Catatan%2B%2B-${fallbackVersion}-macOS-arm64.zip`;
 

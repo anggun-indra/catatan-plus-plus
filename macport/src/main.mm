@@ -2801,7 +2801,7 @@ typedef NS_ENUM(NSInteger, PreviewLayoutMode) {
     (void)sender;
     NSDictionary *options = @{
         NSAboutPanelOptionApplicationName: @"Catatan++",
-        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.3",
+        NSAboutPanelOptionApplicationVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"1.0.4",
         NSAboutPanelOptionVersion: [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"4",
         @"Copyright": @"© 2026 Anggun Indra & Upstream Notepad++ Contributors"
     };
