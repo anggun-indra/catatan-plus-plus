@@ -15,11 +15,13 @@ jobs:
     name: Build & Test on Apple Silicon
     runs-on: macos-14 # Native Apple Silicon (M-series) runner
     permissions:
-      contents: write
+      contents: read
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Build Catatan++
         run: |
@@ -30,6 +32,25 @@ jobs:
       - name: Run Self-Tests
         run: |
           macport/dist/Catatan++.app/Contents/MacOS/Catatan++ --selftest
+
+  release:
+    name: Package & Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-and-test
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build Catatan++
+        run: |
+          cd macport
+          chmod +x build.sh
+          ./build.sh
 
       - name: Package DMG & ZIP (Release Only)
         if: startsWith(github.ref, 'refs/tags/v')
