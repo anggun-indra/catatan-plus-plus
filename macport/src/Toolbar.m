@@ -229,12 +229,16 @@ static const NSInteger kItemCount = (NSInteger)(sizeof(kItems) / sizeof(kItems[0
                                      kIconSize, kIconSize);
 
         if (!enabled) {
-            NSImage *dimmed = [icon copy];
-            [dimmed setTemplate:YES];
+            NSImage *dimmed = [NSImage imageWithSize:icon.size flipped:YES drawingHandler:^BOOL(NSRect dstRect) {
+                [icon drawInRect:dstRect fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
+                [[NSColor disabledControlTextColor] setFill];
+                NSRectFillUsingOperation(dstRect, NSCompositingOperationSourceAtop);
+                return YES;
+            }];
             [dimmed drawInRect:iconRect
                       fromRect:NSZeroRect
                      operation:NSCompositingOperationSourceOver
-                      fraction:0.3
+                      fraction:1.0
                 respectFlipped:YES
                          hints:nil];
             continue;
@@ -254,12 +258,13 @@ static const NSInteger kItemCount = (NSInteger)(sizeof(kItems) / sizeof(kItems[0
             continue;
         }
 
-        [icon drawInRect:iconRect
-                fromRect:NSZeroRect
-               operation:NSCompositingOperationSourceOver
-                fraction:1.0
-          respectFlipped:YES
-                   hints:nil];
+        NSImage *tinted = [NSImage imageWithSize:icon.size flipped:YES drawingHandler:^BOOL(NSRect dstRect) {
+            [icon drawInRect:dstRect fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
+            [[NSColor labelColor] setFill];
+            NSRectFillUsingOperation(dstRect, NSCompositingOperationSourceAtop);
+            return YES;
+        }];
+        [tinted drawInRect:iconRect fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0 respectFlipped:YES hints:nil];
     }
 }
 
